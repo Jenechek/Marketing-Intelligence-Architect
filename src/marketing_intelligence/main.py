@@ -13,7 +13,8 @@ from fastapi.templating import Jinja2Templates
 from .config import Settings
 from .database import build_engine, initialize_database
 from .logging_config import configure_logging
-from .sites import add_site, list_sites, validate_site
+from .models import Site
+from .sites import add_site, get_site, list_sites, update_site, validate_site
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -70,6 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "form": form or {"name": "", "url": ""},
                 "errors": errors or {},
                 "created": request.query_params.get("created") == "1",
+                "updated": request.query_params.get("updated") == "1",
             },
             status_code=status_code,
         )
@@ -94,6 +96,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         add_site(request.app.state.engine, form["name"], form["url"])
         return RedirectResponse(url="/?created=1", status_code=303)
+
+    def render_edit_site(
+        request: Request,
+        site: Site,
+        *,
+        form: dict[str, str] | None = None,
+        errors: dict[str, str] | None = None,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="edit_site.html",
+            context={
+                "site": site,
+                "form": form or {"name": site.name, "url": site.url},
+                "errors": errors or {},
+            },
+            status_code=status_code,
+        )
+
+    def render_site_not_found(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="site_not_found.html",
+            status_code=404,
+        )
+
+    @application.get("/sites/{site_id}/edit", response_class=HTMLResponse)
+    async def edit_site(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        return render_edit_site(request, site)
+
+    @application.post("/sites/{site_id}/edit", response_class=HTMLResponse)
+    async def save_site(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+
+        raw_form = parse_qs(
+            (await request.body()).decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        form = {
+            "name": raw_form.get("name", [""])[0],
+            "url": raw_form.get("url", [""])[0],
+        }
+        errors = validate_site(form["name"], form["url"])
+        if errors:
+            return render_edit_site(
+                request,
+                site,
+                form=form,
+                errors=errors,
+                status_code=422,
+            )
+
+        updated_site = update_site(
+            request.app.state.engine,
+            site_id,
+            form["name"],
+            form["url"],
+        )
+        if updated_site is None:
+            return render_site_not_found(request)
+        return RedirectResponse(url="/?updated=1", status_code=303)
 
     return application
 

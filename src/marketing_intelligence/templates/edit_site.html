@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Редактирование сайта — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Marketing Intelligence</p>
+                <h1>Редактирование сайта</h1>
+                <p class="lead">Измените название или полный адрес сайта.</p>
+            </div>
+        </header>
+
+        <section class="content-card form-card" aria-labelledby="edit-site-title">
+            <div class="section-heading">
+                <div>
+                    <h2 id="edit-site-title">Данные сайта</h2>
+                    <p>Проверьте значения перед сохранением.</p>
+                </div>
+            </div>
+
+            {% if errors %}
+            <div class="notice error" role="alert">Изменения не сохранены. Проверьте отмеченные поля.</div>
+            {% endif %}
+
+            <form action="/sites/{{ site.id }}/edit" method="post" novalidate>
+                <div class="field">
+                    <label for="name">Название</label>
+                    <input id="name" name="name" type="text" value="{{ form.name }}"
+                           placeholder="Например, Мой интернет-магазин" required
+                           {% if errors.name %}aria-invalid="true" aria-describedby="name-error"{% endif %}>
+                    {% if errors.name %}<p class="field-error" id="name-error">{{ errors.name }}</p>{% endif %}
+                </div>
+
+                <div class="field">
+                    <label for="url">URL</label>
+                    <input id="url" name="url" type="url" value="{{ form.url }}"
+                           placeholder="https://example.com" required
+                           {% if errors.url %}aria-invalid="true" aria-describedby="url-help url-error"{% else %}aria-describedby="url-help"{% endif %}>
+                    <p class="field-help" id="url-help">Начните адрес с http:// или https://</p>
+                    {% if errors.url %}<p class="field-error" id="url-error">{{ errors.url }}</p>{% endif %}
+                </div>
+
+                <div class="form-actions">
+                    <button class="primary-action" type="submit">Сохранить изменения</button>
+                    <a class="secondary-action" href="/">Отмена</a>
+                </div>
+            </form>
+        </section>
+    </main>
+</body>
+</html>
