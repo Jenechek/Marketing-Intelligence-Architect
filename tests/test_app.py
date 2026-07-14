@@ -27,6 +27,8 @@ def test_site_list_starts_empty_and_initializes_sqlite(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Сайтов пока нет" in response.text
     assert "Добавить сайт" in response.text
+    assert response.text.count('class="primary-action"') == 1
+    assert '<button class="primary-action"' in response.text
     assert database_path.is_file()
 
 

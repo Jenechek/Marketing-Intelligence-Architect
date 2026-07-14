@@ -96,6 +96,5 @@ input[aria-invalid="true"] { border-color: #b83b3b; }
 @media (max-width: 640px) {
     .page-shell { width: min(100% - 24px, 1040px); padding-top: 28px; }
     .page-header { align-items: flex-start; flex-direction: column; }
-    .page-header .primary-action { width: 100%; }
     .site-list li { align-items: flex-start; flex-direction: column; gap: 10px; }
 }
