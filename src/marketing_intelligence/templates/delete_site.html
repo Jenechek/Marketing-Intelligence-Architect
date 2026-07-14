@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Удаление сайта — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Marketing Intelligence</p>
+                <h1>Удалить сайт?</h1>
+                <p class="lead">Подтвердите опасное действие.</p>
+            </div>
+        </header>
+
+        <section class="content-card danger-confirmation" aria-labelledby="delete-site-title">
+            <div class="notice error" role="alert">
+                Сайт будет окончательно удалён из базы. Это действие необратимо.
+            </div>
+
+            <h2 id="delete-site-title">{{ site.name }}</h2>
+            <p class="site-url">{{ site.url }}</p>
+
+            <form action="/sites/{{ site.id }}/delete" method="post">
+                <div class="form-actions">
+                    <button class="danger-action" type="submit">Да, удалить сайт</button>
+                    <a class="secondary-action" href="/sites/{{ site.id }}/edit">Отмена</a>
+                </div>
+            </form>
+        </section>
+    </main>
+</body>
+</html>

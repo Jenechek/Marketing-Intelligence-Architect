@@ -14,7 +14,7 @@ from .config import Settings
 from .database import build_engine, initialize_database
 from .logging_config import configure_logging
 from .models import Site
-from .sites import add_site, get_site, list_sites, update_site, validate_site
+from .sites import add_site, delete_site, get_site, list_sites, update_site, validate_site
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -72,6 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "errors": errors or {},
                 "created": request.query_params.get("created") == "1",
                 "updated": request.query_params.get("updated") == "1",
+                "deleted": request.query_params.get("deleted") == "1",
             },
             status_code=status_code,
         )
@@ -163,6 +164,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if updated_site is None:
             return render_site_not_found(request)
         return RedirectResponse(url="/?updated=1", status_code=303)
+
+    @application.get("/sites/{site_id}/delete", response_class=HTMLResponse)
+    async def confirm_delete_site(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        return templates.TemplateResponse(
+            request=request,
+            name="delete_site.html",
+            context={"site": site},
+        )
+
+    @application.post("/sites/{site_id}/delete", response_class=HTMLResponse)
+    async def remove_site(request: Request, site_id: int) -> HTMLResponse:
+        if not delete_site(request.app.state.engine, site_id):
+            return render_site_not_found(request)
+        return RedirectResponse(url="/?deleted=1", status_code=303)
 
     return application
 
