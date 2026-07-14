@@ -3,30 +3,81 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Marketing Intelligence</title>
+    <title>Сайты — Marketing Intelligence</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
 </head>
 <body>
     <main class="page-shell">
-        <section class="status-card" aria-labelledby="page-title">
-            <p class="eyebrow">Локальное приложение</p>
-            <h1 id="page-title">Marketing Intelligence запущен</h1>
-            <p class="lead">Минимальная рабочая основа подготовлена и отвечает на запросы.</p>
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Marketing Intelligence</p>
+                <h1>Сайты</h1>
+                <p class="lead">Добавьте сайты, за которыми хотите наблюдать.</p>
+            </div>
+        </header>
 
-            <div class="status" role="status" aria-label="Текущее состояние приложения">
-                <span class="status-mark" aria-hidden="true">✓</span>
+        {% if created %}
+        <div class="notice success" role="status">Сайт добавлен и сохранён.</div>
+        {% endif %}
+
+        <section class="content-card" aria-labelledby="site-list-title">
+            <div class="section-heading">
+                <h2 id="site-list-title">Добавленные сайты</h2>
+                <span class="count">{{ sites|length }}</span>
+            </div>
+
+            {% if sites %}
+            <ul class="site-list">
+                {% for site in sites %}
+                <li>
+                    <div>
+                        <strong>{{ site.name }}</strong>
+                        <a href="{{ site.url }}" target="_blank" rel="noopener noreferrer">{{ site.url }}</a>
+                    </div>
+                    <span class="site-status">Добавлен</span>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty-state">
+                <h3>Сайтов пока нет</h3>
+                <p>Заполните короткую форму ниже. Данные останутся на этом компьютере.</p>
+            </div>
+            {% endif %}
+        </section>
+
+        <section class="content-card form-card" id="add-site" aria-labelledby="add-site-title">
+            <div class="section-heading">
                 <div>
-                    <span class="status-label">Статус</span>
-                    <strong>{{ status }}</strong>
+                    <h2 id="add-site-title">Добавить сайт</h2>
+                    <p>Нужны только название и полный адрес.</p>
                 </div>
             </div>
 
-            <div class="next-step">
-                <h2>Следующий шаг</h2>
-                <p>{{ next_step }}</p>
-            </div>
+            {% if errors %}
+            <div class="notice error" role="alert">Проверьте отмеченные поля.</div>
+            {% endif %}
 
-            <p class="scope-note">Управление сайтами появится на следующем этапе и сейчас недоступно.</p>
+            <form action="/sites" method="post" novalidate>
+                <div class="field">
+                    <label for="name">Название</label>
+                    <input id="name" name="name" type="text" value="{{ form.name }}"
+                           placeholder="Например, Мой интернет-магазин" required
+                           {% if errors.name %}aria-invalid="true" aria-describedby="name-error"{% endif %}>
+                    {% if errors.name %}<p class="field-error" id="name-error">{{ errors.name }}</p>{% endif %}
+                </div>
+
+                <div class="field">
+                    <label for="url">URL</label>
+                    <input id="url" name="url" type="url" value="{{ form.url }}"
+                           placeholder="https://example.com" required
+                           {% if errors.url %}aria-invalid="true" aria-describedby="url-help url-error"{% else %}aria-describedby="url-help"{% endif %}>
+                    <p class="field-help" id="url-help">Начните адрес с http:// или https://</p>
+                    {% if errors.url %}<p class="field-error" id="url-error">{{ errors.url }}</p>{% endif %}
+                </div>
+
+                <button class="primary-action" type="submit">Добавить сайт</button>
+            </form>
         </section>
     </main>
 </body>
