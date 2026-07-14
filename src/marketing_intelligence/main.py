@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+import secrets
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
@@ -10,6 +11,10 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .confirmation import (
+    create_delete_confirmation_token,
+    validate_delete_confirmation_token,
+)
 from .config import Settings
 from .database import build_engine, initialize_database
 from .logging_config import configure_logging
@@ -37,6 +42,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         application.state.settings = active_settings
         application.state.engine = engine
+        application.state.delete_confirmation_secret = secrets.token_bytes(32)
         logger.info("Marketing Intelligence запущен")
 
         try:
@@ -124,6 +130,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=404,
         )
 
+    def render_delete_forbidden(request: Request, site: Site) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="delete_forbidden.html",
+            context={"site": site},
+            status_code=403,
+        )
+
     @application.get("/sites/{site_id}/edit", response_class=HTMLResponse)
     async def edit_site(request: Request, site_id: int) -> HTMLResponse:
         site = get_site(request.app.state.engine, site_id)
@@ -173,11 +187,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="delete_site.html",
-            context={"site": site},
+            context={
+                "site": site,
+                "confirmation_token": create_delete_confirmation_token(
+                    request.app.state.delete_confirmation_secret,
+                    site_id,
+                ),
+            },
         )
 
     @application.post("/sites/{site_id}/delete", response_class=HTMLResponse)
     async def remove_site(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+
+        raw_form = parse_qs(
+            (await request.body()).decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        confirmation_token = raw_form.get("confirmation_token", [""])[0]
+        if not validate_delete_confirmation_token(
+            request.app.state.delete_confirmation_secret,
+            site_id,
+            confirmation_token,
+        ):
+            return render_delete_forbidden(request, site)
+
         if not delete_site(request.app.state.engine, site_id):
             return render_site_not_found(request)
         return RedirectResponse(url="/?deleted=1", status_code=303)

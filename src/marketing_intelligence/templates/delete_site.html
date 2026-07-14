@@ -25,6 +25,7 @@
             <p class="site-url">{{ site.url }}</p>
 
             <form action="/sites/{{ site.id }}/delete" method="post">
+                <input type="hidden" name="confirmation_token" value="{{ confirmation_token }}">
                 <div class="form-actions">
                     <button class="danger-action" type="submit">Да, удалить сайт</button>
                     <a class="secondary-action" href="/sites/{{ site.id }}/edit">Отмена</a>
