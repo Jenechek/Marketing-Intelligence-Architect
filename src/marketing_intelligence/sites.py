@@ -81,3 +81,16 @@ def update_site(engine: Engine, site_id: int, name: str, url: str) -> Site | Non
         session.commit()
         session.refresh(site)
         return site
+
+
+def delete_site(engine: Engine, site_id: int) -> bool:
+    """Окончательно удалить выбранный сайт одной транзакцией."""
+
+    with Session(engine) as session:
+        site = session.get(Site, site_id)
+        if site is None:
+            return False
+
+        session.delete(site)
+        session.commit()
+        return True

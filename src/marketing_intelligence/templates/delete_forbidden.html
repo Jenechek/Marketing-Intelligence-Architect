@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Удаление не подтверждено — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Marketing Intelligence</p>
+                <h1>Удаление не подтверждено</h1>
+                <p class="lead">Сайт не был удалён.</p>
+            </div>
+        </header>
+
+        <section class="content-card" aria-labelledby="delete-error-title">
+            <div class="notice error" role="alert">
+                Подтверждение удаления недействительно. Откройте страницу подтверждения ещё раз.
+            </div>
+            <h2 id="delete-error-title">{{ site.name }}</h2>
+            <p class="site-url">{{ site.url }}</p>
+            <a class="secondary-action" href="/sites/{{ site.id }}/delete">Вернуться к подтверждению</a>
+        </section>
+    </main>
+</body>
+</html>
