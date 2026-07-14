@@ -69,6 +69,17 @@ python -m pytest
 
 ## Частые ошибки
 
+### PermissionError при запуске тестов
+
+Если `pytest` не может использовать системную временную папку и показывает `PermissionError`, откройте командную строку (`cmd`) в папке проекта и выполните:
+
+```bat
+set "MI_PYTEST_TEMP=%USERPROFILE%\mi-pytest-%RANDOM%"
+.\.venv\Scripts\python.exe -m pytest -p no:cacheprovider --basetemp="%MI_PYTEST_TEMP%" -v
+```
+
+Команда создаёт отдельную временную папку в профиле пользователя и не затрагивает рабочую базу проекта.
+
 ### Python не найден
 
 Переустановите Python с включённым флажком **Add Python to PATH** или используйте команду `py`.
