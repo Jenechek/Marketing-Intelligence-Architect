@@ -11,9 +11,13 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from .availability import AvailabilityChecker, AvailabilityResult
 from .confirmation import (
+    CHECK_AVAILABILITY_ACTION,
+    create_action_token,
     create_delete_confirmation_token,
     validate_delete_confirmation_token,
+    validate_action_token,
 )
 from .config import Settings
 from .database import build_engine, initialize_database
@@ -26,7 +30,11 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    *,
+    availability_checker: AvailabilityChecker | None = None,
+) -> FastAPI:
     """Создать приложение с переданными или локальными настройками."""
 
     active_settings = settings or Settings.from_environment()
@@ -42,7 +50,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         application.state.settings = active_settings
         application.state.engine = engine
-        application.state.delete_confirmation_secret = secrets.token_bytes(32)
+        application.state.action_token_secret = secrets.token_bytes(32)
+        application.state.availability_checker = availability_checker or AvailabilityChecker()
         logger.info("Marketing Intelligence запущен")
 
         try:
@@ -138,6 +147,36 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             status_code=403,
         )
 
+    def render_check_site(
+        request: Request,
+        site: Site,
+        *,
+        result: AvailabilityResult | None = None,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="check_site.html",
+            context={
+                "site": site,
+                "result": result,
+                "action_token": create_action_token(
+                    request.app.state.action_token_secret,
+                    site.id,
+                    CHECK_AVAILABILITY_ACTION,
+                ),
+            },
+            status_code=status_code,
+        )
+
+    def render_check_forbidden(request: Request, site: Site) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="check_forbidden.html",
+            context={"site": site},
+            status_code=403,
+        )
+
     @application.get("/sites/{site_id}/edit", response_class=HTMLResponse)
     async def edit_site(request: Request, site_id: int) -> HTMLResponse:
         site = get_site(request.app.state.engine, site_id)
@@ -190,7 +229,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             context={
                 "site": site,
                 "confirmation_token": create_delete_confirmation_token(
-                    request.app.state.delete_confirmation_secret,
+                    request.app.state.action_token_secret,
                     site_id,
                 ),
             },
@@ -208,7 +247,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         confirmation_token = raw_form.get("confirmation_token", [""])[0]
         if not validate_delete_confirmation_token(
-            request.app.state.delete_confirmation_secret,
+            request.app.state.action_token_secret,
             site_id,
             confirmation_token,
         ):
@@ -217,6 +256,35 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not delete_site(request.app.state.engine, site_id):
             return render_site_not_found(request)
         return RedirectResponse(url="/?deleted=1", status_code=303)
+
+    @application.get("/sites/{site_id}/check", response_class=HTMLResponse)
+    async def check_site_screen(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        return render_check_site(request, site)
+
+    @application.post("/sites/{site_id}/check", response_class=HTMLResponse)
+    async def run_site_check(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+
+        raw_form = parse_qs(
+            (await request.body()).decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        action_token = raw_form.get("action_token", [""])[0]
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            CHECK_AVAILABILITY_ACTION,
+            action_token,
+        ):
+            return render_check_forbidden(request, site)
+
+        result = await request.app.state.availability_checker.check(site.url)
+        return render_check_site(request, site, result=result)
 
     return application
 

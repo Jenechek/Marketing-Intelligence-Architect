@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Проверка не запущена — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Защищённое действие</p>
+                <h1>Проверка не запущена</h1>
+                <p class="lead">Токен запуска отсутствует, недействителен или предназначен для другого действия.</p>
+            </div>
+        </header>
+        <section class="content-card">
+            <div class="notice error" role="alert">Сетевые запросы не выполнялись. Откройте экран проверки сайта заново.</div>
+            <p><strong>{{ site.name }}</strong><br>{{ site.url }}</p>
+            <a class="primary-action" href="/sites/{{ site.id }}/check">Открыть экран проверки</a>
+            <a class="secondary-action" href="/">Вернуться к списку</a>
+        </section>
+    </main>
+</body>
+</html>

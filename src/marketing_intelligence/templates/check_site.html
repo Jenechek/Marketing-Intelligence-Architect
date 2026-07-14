@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Проверка доступности — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Безопасная ручная проверка</p>
+                <h1>Проверить доступность</h1>
+                <p class="lead">Будут запрошены только robots.txt и, если он разрешает, одна стартовая страница.</p>
+            </div>
+        </header>
+
+        <section class="content-card" aria-labelledby="site-title">
+            <div class="section-heading">
+                <div>
+                    <h2 id="site-title">{{ site.name }}</h2>
+                    <a href="{{ site.url }}" target="_blank" rel="noopener noreferrer">{{ site.url }}</a>
+                </div>
+            </div>
+
+            {% if result %}
+            <div class="notice {% if result.status == 'available' %}success{% elif result.status == 'forbidden' or result.status == 'network_error' %}error{% endif %}" role="status">
+                <strong>{{ result.title }}</strong>
+                <p>{{ result.message }}</p>
+                {% if result.robots_status %}<p>Ответ robots.txt: HTTP {{ result.robots_status }}.</p>{% endif %}
+                {% if result.page_status %}<p>Ответ стартовой страницы: HTTP {{ result.page_status }}.</p>{% endif %}
+            </div>
+            {% endif %}
+
+            <p>Проверка не обходит ссылки, не выполняет JavaScript, не отправляет формы и не сохраняет результат.</p>
+
+            <form action="/sites/{{ site.id }}/check" method="post">
+                <input type="hidden" name="action_token" value="{{ action_token }}">
+                <button class="primary-action" type="submit">Запустить проверку</button>
+                <a class="secondary-action" href="/">Вернуться к списку</a>
+            </form>
+        </section>
+    </main>
+</body>
+</html>
