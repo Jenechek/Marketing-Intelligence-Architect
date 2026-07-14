@@ -1,226 +1,88 @@
 # AGENTS.md
 
-## Project identity
+## Purpose and source routing
 
-This repository contains Marketing Intelligence, a local-first web application for an internet marketer.
+This repository contains Marketing Intelligence, a local-first web application for a non-technical Russian-speaking internet marketer.
 
-Read these files before making changes:
+Always read:
 
-1. `PROJECT.md`
-2. `REQUIREMENTS.md`
-3. `ROADMAP.md`
-4. `DECISIONS.md`
-5. `TASKS.md`
-6. `UX_UI_PRINCIPLES.md`
-7. `README.md`
+- this file;
+- the current task in `TASKS.md`;
+- only the requirement sections referenced by that task in `REQUIREMENTS.md`.
 
-Treat them as the project's source of truth.
+Read other documents only when relevant:
 
-## User profile
+- `PROJECT.md` and `DECISIONS.md` — architecture, dependencies, product boundaries, or a new decision;
+- `ROADMAP.md` — scope, sequencing, or milestone changes;
+- `UX_UI_PRINCIPLES.md` — interface or user-flow changes;
+- `README.md` and `docs/` — installation, operation, or user instructions;
+- `CHANGELOG.md` and `PROJECT_LOG.md` — completion records, not general implementation context.
 
-The product owner is not a programmer.
+Do not reread unrelated unchanged documents. If sources conflict, stop and report the conflict.
 
-All summaries, instructions, errors, verification steps, and handoff notes must be understandable to a non-technical Russian-speaking user.
+## Product constraints
 
-Use technical terminology only when necessary and explain it in plain Russian.
+- Keep the application local-first and useful without paid services, mandatory cloud hosting, paid proxies, or paid AI APIs.
+- Free external services may be optional integrations only.
+- Prefer simple, maintainable, open-source, locally installable solutions with suitable licenses.
+- Use a modular monolith; do not add microservices, Redis, Celery, Elasticsearch, Kubernetes, or similar infrastructure without a measured need and recorded decision.
+- Do not replace the approved stack, expand task scope, or implement speculative features silently.
+- Never claim that a test or command succeeded unless it was actually run.
+- Never commit credentials, generated databases, browser profiles, logs, environments, or large crawl archives.
 
-## Core constraints
+Approved stack: Python, FastAPI, SQLite, SQLModel, server-rendered HTML or minimal JavaScript, HTTPX, BeautifulSoup, lxml, APScheduler, Pytest, and Git. Use Playwright only when ordinary HTTP retrieval is demonstrably insufficient. Add dependencies only for a current requirement when no simpler option is adequate.
 
-1. The application must be local-first.
-2. Core functionality must work without paid services.
-3. Do not introduce mandatory paid APIs.
-4. Do not introduce mandatory cloud hosting.
-5. Do not introduce paid proxies.
-6. Do not use trial services as critical infrastructure.
-7. Do not use the OpenAI API or another paid AI API as a core dependency.
-8. Free external services may only be optional integrations.
-9. Prefer open-source, locally installable dependencies with suitable licenses.
-10. Prefer the simplest maintainable implementation.
-11. Do not introduce microservices in the initial versions.
-12. Do not introduce Redis, Celery, Elasticsearch, Kubernetes, or similar infrastructure unless an existing measured problem requires it.
-13. Do not replace the approved technology stack without documenting the decision.
-14. Do not silently expand the scope of a task.
-15. Do not fabricate successful test results or claim that a command was run when it was not.
+## Architecture and implementation
 
-## Initial approved stack
+- Separate domain logic from HTTP routes and interface code.
+- Keep crawling, parsing, comparison, persistence, and presentation as distinct modules with clear interfaces.
+- Avoid global mutable state, duplicate implementations, premature abstractions, and dead code.
+- Keep configuration outside source code and secrets in ignored environment or local configuration.
+- Make database changes explicit and reversible; preserve previously collected data.
+- Make the smallest coherent change that completes the current task and preserve unrelated behavior.
+- Add or update relevant tests and handle expected errors.
+- Write user-facing text in clear Russian.
 
-- Python
-- FastAPI
-- SQLite
-- SQLModel
-- server-rendered HTML or minimal JavaScript
-- HTTPX
-- BeautifulSoup and lxml
-- Playwright only where normal HTTP retrieval is insufficient
-- APScheduler
-- Pytest
-- Git
+For interface work, follow `UX_UI_PRINCIPLES.md`. Keep one clear primary action per screen, use progressive disclosure for advanced actions, preserve accessibility and visible feedback, and require confirmation for dangerous actions.
 
-Use additional dependencies only when they solve a current requirement and no simpler solution is adequate.
+## Safety and integrity
 
-## Architecture rules
+For crawling: respect `robots.txt`; use a descriptive User-Agent, delays, limits, and timeouts; normalize URLs; avoid destructive links, infinite navigation traps, repeated variants, and automatic form submission; never bypass authentication, CAPTCHAs, access controls, or anti-bot protections.
 
-- Begin with a modular monolith.
-- Keep domain logic separate from HTTP routes and interface code.
-- Keep crawling, parsing, comparison, persistence, and presentation as distinct modules.
-- Use clear interfaces between modules.
-- Avoid global mutable state.
-- Keep configuration outside source code.
-- Store secrets only in environment variables or ignored local configuration.
-- Make database changes explicit and reversible.
-- Preserve previously collected crawl data.
-- Avoid premature abstractions.
-- Avoid speculative features.
+For data: use transactions for multi-step writes; do not delete history without explicit confirmation; keep ordinary file-copy backup possible; a failed crawl must not corrupt earlier results; record status, timestamps, errors, and partial completion; distinguish missing data from zero.
 
-## UX/UI rules
+Label analytical output as a fact, calculated metric, correlation, hypothesis, or recommendation. Never present a hypothesis as a confirmed cause.
 
-- Read `UX_UI_PRINCIPLES.md` before changing interface code.
-- Basic actions must be visible and understandable immediately.
-- Advanced actions must use progressive disclosure.
-- Do not display all possible actions at the same time.
-- Do not create separate beginner and expert modes unless explicitly approved.
-- Do not hide essential actions inside menus.
-- Do not add several visually equal primary buttons to one screen.
-- Prefer one clear primary action per screen.
-- Advanced actions should be integrated into existing contextual controls where appropriate.
-- Split buttons may visually appear as one element, but their click areas must remain behaviorally distinct.
-- Minimalism must not reduce accessibility or feedback.
-- Keyboard navigation, visible focus, and understandable labels are required.
-- Dangerous actions must never be the default action.
-- Reuse existing interaction patterns instead of inventing a new one for each screen.
+## Workflow
 
-## Development workflow
+Before editing:
 
-Before changing code:
+1. Inspect the current task, relevant requirements, existing implementation, and affected files.
+2. Check scope, dependencies, data risk, and whether a decision is required.
+3. Restate the result only when ambiguity must be resolved.
 
-1. Read the relevant project documentation.
-2. Inspect the existing implementation.
-3. Restate the requested result.
-4. Identify affected files.
-5. Check whether the task introduces a paid or external dependency.
-6. Prefer modifying existing code over creating a parallel implementation.
+During and after editing:
 
-During implementation:
+1. Implement only the current task.
+2. Run the narrowest relevant tests and a real verification command where practical.
+3. Report commands and results honestly.
+4. Update only affected documentation.
+5. After successful completion, update `TASKS.md` and `PROJECT_LOG.md`; update `README.md`, `ROADMAP.md`, `CHANGELOG.md`, `DECISIONS.md`, or `PROJECT.md` only when their subject actually changed.
 
-1. Make the smallest coherent change that completes the task.
-2. Preserve existing behavior unless the task explicitly changes it.
-3. Add or update tests.
-4. Handle expected errors.
-5. Write user-facing messages in clear Russian.
-6. Keep functions and modules reasonably small.
-7. Do not leave dead code or duplicate implementations.
-8. Do not commit credentials, generated databases, browser profiles, or large crawl archives.
+Tasks must follow the approved order. Do not begin the next task before the current one is implemented, verified, documented, and accepted. Record blockers in `TASKS.md` rather than skipping ahead.
 
-After implementation:
+## Token-efficient operation
 
-1. Run relevant tests.
-2. Run the application or relevant verification command where possible.
-3. Report exactly which commands were run.
-4. Report failures honestly.
-5. Update `TASKS.md`.
-6. Update `README.md` when setup or usage changes.
-7. Update `DECISIONS.md` when an architectural decision changes.
-8. Update `CHANGELOG.md` when a user-visible capability changes.
+- Do not repeat the prompt, unchanged project context, or successful logs.
+- Use targeted file reads and searches. Prefer `rg`, specific paths, line ranges, `pytest -q`, `--maxfail=1`, and compact Git summaries.
+- Preserve complete commands, relevant error text, acceptance criteria, risks, and blockers; brevity must not remove decision-critical information.
+- Intermediate updates should normally be at most two short sentences.
+- The final report should contain only: result, changed files, verification, limitations, commit/PR, and one next step. Keep it within 12 bullets unless a failure requires detail.
+- Do not use subagents or broad web research for a well-scoped mechanical task unless they materially reduce risk or time.
 
-## Definition of done
+## Definition of done and stop conditions
 
-A task is complete only when:
+A task is complete only when the requested flow works end to end, relevant tests pass, expected errors are handled, documentation is current, verification is understandable in Russian, and no mandatory paid dependency was introduced.
 
-- the requested user flow works from beginning to end;
-- the feature is accessible through the interface where applicable;
-- expected error cases are handled;
-- relevant tests pass;
-- documentation is updated;
-- verification steps are provided in Russian;
-- no mandatory paid dependency has been introduced.
+Stop and explain before proceeding when credentials are unavailable, an action may destroy data, a mandatory paid dependency would be required, project sources conflict, or tests expose data-loss or security risk. Difficulty alone is not a stop condition: complete the safe verified portion and report the limitation.
 
-## Crawler safety
-
-- Respect `robots.txt` where applicable.
-- Use a descriptive user agent.
-- Use rate limits and delays.
-- Do not create excessive concurrent requests.
-- Set timeouts.
-- Limit crawl depth and page count through configuration.
-- Avoid logout links, destructive actions, infinite calendars, faceted-navigation traps, and repeated URL variants.
-- Normalize URLs before storing them.
-- Never submit forms automatically unless explicitly approved.
-- Do not bypass authentication, CAPTCHAs, access controls, or anti-bot protections.
-
-## Data and reliability
-
-- Do not delete historical crawl data without explicit confirmation.
-- Use transactions for multi-step database operations.
-- Keep backups possible through ordinary file copying or documented export.
-- A failed crawl must not corrupt earlier successful crawl results.
-- Record crawl status, timestamps, errors, and partial completion.
-- Clearly distinguish missing data from zero values.
-
-## Analysis integrity
-
-The application must label conclusions as:
-
-- fact;
-- calculated metric;
-- correlation;
-- hypothesis;
-- recommendation.
-
-Do not present a hypothesis as a confirmed cause.
-
-## Communication format after every task
-
-Respond in Russian using this structure:
-
-### Что сделано
-
-A short non-technical description.
-
-### Какие файлы изменены
-
-List each changed file and its purpose.
-
-### Как проверить
-
-Numbered steps that a non-programmer can follow.
-
-### Проверки
-
-List exact test and verification commands and their results.
-
-### Ограничения или проблемы
-
-State remaining limitations or failures.
-
-### Следующий логичный шаг
-
-Suggest one next step only. Do not begin it unless requested.
-
-## Stop conditions
-
-Stop and explain instead of proceeding when:
-
-- required credentials are unavailable;
-- an operation may destroy user data;
-- the requested approach requires a mandatory paid dependency;
-- requirements contradict `PROJECT.md`;
-- tests reveal data-loss or security risks.
-
-Do not stop merely because a task is difficult. Implement the safe verified portion and report the limitation.
-
-## Mandatory task order and documentation updates
-
-Work strictly in the approved task order.
-
-Do not start the next task before the current task is implemented, verified, and documented.
-
-After every successfully completed task:
-
-1. update `TASKS.md`;
-2. update `PROJECT_LOG.md`;
-3. update `ROADMAP.md` when needed;
-4. update `CHANGELOG.md` when needed;
-5. update `DECISIONS.md` if a new decision was made;
-6. update `PROJECT.md` if project rules changed.
-
-If a task is blocked, record the blocker in `TASKS.md`. Do not skip to a later task unless the plan is explicitly revised.
