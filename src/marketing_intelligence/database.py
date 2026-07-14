@@ -3,6 +3,8 @@
 from sqlmodel import SQLModel, create_engine
 from sqlalchemy.engine import Engine
 
+from . import models  # noqa: F401 - регистрирует таблицы в SQLModel
+
 
 def build_engine(database_url: str) -> Engine:
     """Создать движок SQLModel для локальной SQLite."""
