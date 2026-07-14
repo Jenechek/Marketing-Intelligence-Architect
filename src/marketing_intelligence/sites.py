@@ -49,11 +49,34 @@ def list_sites(engine: Engine) -> list[Site]:
         return list(session.exec(statement).all())
 
 
+def get_site(engine: Engine, site_id: int) -> Site | None:
+    """Вернуть сайт по идентификатору или ``None``, если сайт не найден."""
+
+    with Session(engine) as session:
+        return session.get(Site, site_id)
+
+
 def add_site(engine: Engine, name: str, url: str) -> Site:
     """Сохранить проверенные данные сайта одной транзакцией."""
 
     site = Site(name=name.strip(), url=url.strip())
     with Session(engine) as session:
+        session.add(site)
+        session.commit()
+        session.refresh(site)
+        return site
+
+
+def update_site(engine: Engine, site_id: int, name: str, url: str) -> Site | None:
+    """Обновить проверенные данные сайта одной транзакцией."""
+
+    with Session(engine) as session:
+        site = session.get(Site, site_id)
+        if site is None:
+            return None
+
+        site.name = name.strip()
+        site.url = url.strip()
         session.add(site)
         session.commit()
         session.refresh(site)

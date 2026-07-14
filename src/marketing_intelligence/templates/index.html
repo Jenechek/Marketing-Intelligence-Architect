@@ -19,6 +19,9 @@
         {% if created %}
         <div class="notice success" role="status">Сайт добавлен и сохранён.</div>
         {% endif %}
+        {% if updated %}
+        <div class="notice success" role="status">Изменения сайта сохранены.</div>
+        {% endif %}
 
         <section class="content-card" aria-labelledby="site-list-title">
             <div class="section-heading">
@@ -34,7 +37,10 @@
                         <strong>{{ site.name }}</strong>
                         <a href="{{ site.url }}" target="_blank" rel="noopener noreferrer">{{ site.url }}</a>
                     </div>
-                    <span class="site-status">Добавлен</span>
+                    <div class="site-actions">
+                        <span class="site-status">Добавлен</span>
+                        <a class="secondary-action" href="/sites/{{ site.id }}/edit">Редактировать</a>
+                    </div>
                 </li>
                 {% endfor %}
             </ul>

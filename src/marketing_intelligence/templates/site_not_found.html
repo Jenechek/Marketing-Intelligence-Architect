@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Сайт не найден — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Marketing Intelligence</p>
+                <h1>Сайт не найден</h1>
+                <p class="lead">Возможно, сайт уже недоступен или указан неверный идентификатор.</p>
+            </div>
+        </header>
+
+        <section class="content-card">
+            <div class="notice error" role="alert">Не удалось открыть указанный сайт.</div>
+            <a class="primary-action" href="/">Вернуться к списку сайтов</a>
+        </section>
+    </main>
+</body>
+</html>
