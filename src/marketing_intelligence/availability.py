@@ -10,6 +10,8 @@ from urllib.robotparser import RobotFileParser
 
 import httpx
 
+from .link_discovery import extract_internal_links
+
 
 USER_AGENT = (
     "MarketingIntelligenceBot/0.1 "
@@ -17,6 +19,7 @@ USER_AGENT = (
 )
 REQUEST_TIMEOUT_SECONDS = 15.0
 REQUEST_DELAY_SECONDS = 1.0
+MAX_HTML_BYTES = 2 * 1024 * 1024
 
 
 class AvailabilityStatus(StrEnum):
@@ -50,6 +53,9 @@ class AvailabilityResult:
     message: str
     robots_status: int | None = None
     page_status: int | None = None
+    discovered_links: tuple[str, ...] = ()
+    links_limited: bool = False
+    discovery_message: str | None = None
 
 
 ClientFactory = Callable[..., Any]
@@ -165,11 +171,13 @@ class AvailabilityChecker:
                     page_status=status,
                 )
             if 200 <= status < 300:
+                discovery = await _discover_from_response(response, start_url)
                 return AvailabilityResult(
                     AvailabilityStatus.AVAILABLE,
                     "Доступно",
                     "robots.txt разрешает запрос, а стартовая страница ответила без перенаправления.",
                     page_status=status,
+                    **discovery,
                 )
             return AvailabilityResult(
                 AvailabilityStatus.DEFERRED,
@@ -184,6 +192,57 @@ class AvailabilityChecker:
 def _robots_url(start_url: str) -> str:
     parsed = urlsplit(start_url)
     return urlunsplit((parsed.scheme, parsed.netloc, "/robots.txt", "", ""))
+
+
+async def _discover_from_response(
+    response: httpx.Response,
+    start_url: str,
+) -> dict[str, Any]:
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+    if content_type not in {"text/html", "application/xhtml+xml"}:
+        return {
+            "discovery_message": "Стартовая страница не является HTML. Внутренние ссылки не извлекались."
+        }
+
+    declared_length = response.headers.get("content-length")
+    if declared_length:
+        try:
+            if int(declared_length) > MAX_HTML_BYTES:
+                return {
+                    "discovery_message": "HTML-страница превышает 2 МиБ. Внутренние ссылки не извлекались."
+                }
+        except ValueError:
+            pass
+
+    content = bytearray()
+    async for chunk in response.aiter_bytes():
+        remaining = MAX_HTML_BYTES - len(content)
+        if len(chunk) > remaining:
+            return {
+                "discovery_message": "HTML-страница превышает 2 МиБ. Внутренние ссылки не извлекались."
+            }
+        content.extend(chunk)
+
+    try:
+        encoding = response.encoding or "utf-8"
+        html = bytes(content).decode(encoding, errors="replace")
+        links, limited = extract_internal_links(html, start_url)
+    except Exception:
+        return {
+            "discovery_message": "Не удалось разобрать HTML стартовой страницы. Внутренние ссылки не извлечены."
+        }
+
+    if not links:
+        message = "На стартовой HTML-странице внутренние ссылки не найдены."
+    elif limited:
+        message = "Показаны первые 200 уникальных внутренних ссылок. Список ограничен."
+    else:
+        message = f"Найдено внутренних ссылок: {len(links)}."
+    return {
+        "discovered_links": links,
+        "links_limited": limited,
+        "discovery_message": message,
+    }
 
 
 def _network_error(message: str) -> AvailabilityResult:
