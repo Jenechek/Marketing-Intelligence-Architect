@@ -7,8 +7,10 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from marketing_intelligence.config import Settings
+from marketing_intelligence.crawl_history import start_crawl_run
+from marketing_intelligence.crawler import CrawlSettings
 from marketing_intelligence.main import create_app
-from marketing_intelligence.models import AvailabilityCheck
+from marketing_intelligence.models import AvailabilityCheck, CrawlPageRecord, CrawlRun
 
 
 def build_test_app(tmp_path: Path) -> tuple[FastAPI, Path]:
@@ -64,6 +66,51 @@ def saved_check_messages(app: FastAPI) -> list[str]:
         return [check.message for check in checks]
 
 
+def add_saved_crawl(app: FastAPI, site_id: int, page_count: int) -> None:
+    with Session(app.state.engine) as session:
+        run = CrawlRun(
+            site_id=site_id,
+            completed_at=datetime.now(UTC),
+            status="completed",
+            message="Обход сохранён",
+            max_pages=10,
+            max_depth=2,
+            delay=0,
+            timeout=5,
+            user_agent="DeleteTest/1.0",
+            processed=page_count,
+            requested=page_count,
+            successful=page_count,
+            forbidden=0,
+            errors=0,
+            limited=False,
+        )
+        session.add(run)
+        session.flush()
+        session.add_all(
+            CrawlPageRecord(
+                crawl_run_id=run.id,
+                sequence_number=number,
+                url=f"https://example.com/{site_id}/{number}",
+                depth=number - 1,
+                outcome="html",
+                message="Страница обработана",
+                http_status=200,
+            )
+            for number in range(1, page_count + 1)
+        )
+        session.commit()
+
+
+def saved_crawl_data(app: FastAPI) -> tuple[list[int], list[int]]:
+    with Session(app.state.engine) as session:
+        runs = list(session.exec(select(CrawlRun).order_by(CrawlRun.id)).all())
+        pages = list(
+            session.exec(select(CrawlPageRecord).order_by(CrawlPageRecord.id)).all()
+        )
+        return [run.site_id for run in runs], [page.crawl_run_id for page in pages]
+
+
 def test_site_list_starts_empty_and_initializes_sqlite(tmp_path: Path) -> None:
     app, database_path = build_test_app(tmp_path)
 
@@ -97,6 +144,23 @@ def test_add_site_and_keep_it_after_restart(tmp_path: Path) -> None:
     assert response.status_code == 200
     assert "Мой сайт" in response.text
     assert "https://example.com" in response.text
+
+
+def test_application_startup_recovers_running_crawl_after_restart(tmp_path: Path) -> None:
+    app, _ = build_test_app(tmp_path)
+
+    with TestClient(app) as client:
+        add_test_site(client)
+        started = start_crawl_run(app.state.engine, 1, CrawlSettings(delay=0))
+
+    restarted_app, _ = build_test_app(tmp_path)
+    with TestClient(restarted_app):
+        with Session(restarted_app.state.engine) as session:
+            recovered = session.get(CrawlRun, started.id)
+
+    assert recovered is not None
+    assert recovered.status == "interrupted"
+    assert recovered.completed_at is not None
 
 
 def test_invalid_url_is_not_saved_and_has_clear_error(tmp_path: Path) -> None:
@@ -220,6 +284,8 @@ def test_delete_confirmation_shows_site_and_warning_without_deleting(tmp_path: P
         add_test_site(client)
         add_saved_check(app, 1, "Первая проверка")
         add_saved_check(app, 1, "Вторая проверка")
+        add_saved_crawl(app, 1, 2)
+        add_saved_crawl(app, 1, 1)
         response = client.get("/sites/1/delete")
         saved_response = client.get("/")
         second_token = get_delete_confirmation_token(client, 1)
@@ -229,6 +295,8 @@ def test_delete_confirmation_shows_site_and_warning_without_deleting(tmp_path: P
     assert "https://example.com/old" in response.text
     assert "Это действие необратимо" in response.text
     assert "2 записи истории проверок" in response.text
+    assert "запусков обхода — 2" in response.text
+    assert "записей страниц — 3" in response.text
     assert 'method="post"' in response.text
     assert 'type="hidden" name="confirmation_token"' in response.text
     first_token = re.search(
@@ -246,15 +314,18 @@ def test_cancel_delete_returns_to_edit_without_deleting(tmp_path: Path) -> None:
     with TestClient(app) as client:
         add_test_site(client)
         add_saved_check(app, 1, "История должна сохраниться")
+        add_saved_crawl(app, 1, 1)
         confirmation = client.get("/sites/1/delete")
         cancel_response = client.get("/sites/1/edit")
         history = saved_check_messages(app)
+        crawl_data = saved_crawl_data(app)
 
     assert 'href="/sites/1/edit">Отмена</a>' in confirmation.text
     assert cancel_response.status_code == 200
     assert 'value="Исходный сайт"' in cancel_response.text
     assert 'value="https://example.com/old"' in cancel_response.text
     assert history == ["История должна сохраниться"]
+    assert crawl_data == ([1], [1])
 
 
 def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
@@ -263,12 +334,14 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
     with TestClient(app) as client:
         add_test_site(client)
         add_saved_check(app, 1, "История выбранного сайта")
+        add_saved_crawl(app, 1, 2)
         second_response = client.post(
             "/sites",
             data={"name": "Второй сайт", "url": "https://example.org"},
             follow_redirects=False,
         )
         add_saved_check(app, 2, "История второго сайта")
+        add_saved_crawl(app, 2, 1)
         confirmation_token = get_delete_confirmation_token(client, 1)
         response = client.post(
             "/sites/1/delete",
@@ -277,6 +350,7 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
         )
         success_response = client.get(response.headers["location"])
         remaining_history = saved_check_messages(app)
+        remaining_crawl_data = saved_crawl_data(app)
 
     assert second_response.status_code == 303
     assert response.status_code == 303
@@ -285,6 +359,7 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
     assert "Исходный сайт" not in success_response.text
     assert "Второй сайт" in success_response.text
     assert remaining_history == ["История второго сайта"]
+    assert remaining_crawl_data == ([2], [2])
 
 
 def test_deleted_site_stays_absent_after_restart(tmp_path: Path) -> None:
@@ -322,10 +397,12 @@ def test_unknown_site_id_delete_has_controlled_russian_error(tmp_path: Path) -> 
     with TestClient(app) as client:
         add_test_site(client)
         add_saved_check(app, 1, "История другого сайта")
+        add_saved_crawl(app, 1, 1)
         get_response = client.get("/sites/999/delete")
         post_response = client.post("/sites/999/delete")
         saved_response = client.get("/")
         history = saved_check_messages(app)
+        crawl_data = saved_crawl_data(app)
 
     assert get_response.status_code == 404
     assert post_response.status_code == 404
@@ -333,6 +410,7 @@ def test_unknown_site_id_delete_has_controlled_russian_error(tmp_path: Path) -> 
     assert "Не удалось открыть указанный сайт" in post_response.text
     assert "Исходный сайт" in saved_response.text
     assert history == ["История другого сайта"]
+    assert crawl_data == ([1], [1])
 
 
 def test_direct_delete_without_token_is_forbidden_and_keeps_site(tmp_path: Path) -> None:
@@ -341,15 +419,18 @@ def test_direct_delete_without_token_is_forbidden_and_keeps_site(tmp_path: Path)
     with TestClient(app) as client:
         add_test_site(client)
         add_saved_check(app, 1, "История должна сохраниться")
+        add_saved_crawl(app, 1, 1)
         response = client.post("/sites/1/delete")
         saved_response = client.get("/")
         history = saved_check_messages(app)
+        crawl_data = saved_crawl_data(app)
 
     assert response.status_code == 403
     assert "Удаление не подтверждено" in response.text
     assert "Подтверждение удаления недействительно" in response.text
     assert "Исходный сайт" in saved_response.text
     assert history == ["История должна сохраниться"]
+    assert crawl_data == ([1], [1])
 
 
 def test_delete_with_invalid_token_is_forbidden_and_keeps_site(tmp_path: Path) -> None:
@@ -358,17 +439,20 @@ def test_delete_with_invalid_token_is_forbidden_and_keeps_site(tmp_path: Path) -
     with TestClient(app) as client:
         add_test_site(client)
         add_saved_check(app, 1, "История должна сохраниться")
+        add_saved_crawl(app, 1, 1)
         response = client.post(
             "/sites/1/delete",
             data={"confirmation_token": "неверный-токен"},
         )
         saved_response = client.get("/")
         history = saved_check_messages(app)
+        crawl_data = saved_crawl_data(app)
 
     assert response.status_code == 403
     assert "Удаление не подтверждено" in response.text
     assert "Исходный сайт" in saved_response.text
     assert history == ["История должна сохраниться"]
+    assert crawl_data == ([1], [1])
 
 
 def test_delete_token_for_another_site_is_forbidden(tmp_path: Path) -> None:
