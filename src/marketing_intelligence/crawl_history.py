@@ -7,7 +7,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from .crawler import CrawlResult, CrawlSettings, CrawlStatus, Crawler
-from .models import CrawlPageRecord, CrawlRun
+from .models import CrawlPageRecord, CrawlRun, Site
 
 
 RUNNING_STATUS = "running"
@@ -25,17 +25,20 @@ def start_crawl_run(
 ) -> CrawlRun:
     """Зафиксировать запуск до обращения к crawler."""
 
-    run = CrawlRun(
-        site_id=site_id,
-        status=RUNNING_STATUS,
-        message="Обход выполняется.",
-        max_pages=settings.max_pages,
-        max_depth=settings.max_depth,
-        delay=settings.delay,
-        timeout=settings.timeout,
-        user_agent=settings.user_agent,
-    )
     with Session(engine) as session:
+        if session.get(Site, site_id) is None:
+            raise LookupError("Сайт для запуска обхода не найден.")
+
+        run = CrawlRun(
+            site_id=site_id,
+            status=RUNNING_STATUS,
+            message="Обход выполняется.",
+            max_pages=settings.max_pages,
+            max_depth=settings.max_depth,
+            delay=settings.delay,
+            timeout=settings.timeout,
+            user_agent=settings.user_agent,
+        )
         session.add(run)
         session.commit()
         session.refresh(run)

@@ -119,6 +119,32 @@ def test_running_is_created_before_crawler_and_expected_status_is_saved(
     assert saved.completed_at is not None
 
 
+def test_unknown_site_does_not_create_records_or_call_crawler(tmp_path: Path) -> None:
+    engine = initialized_engine(tmp_path)
+
+    class TrackingCrawler:
+        called = False
+
+        async def crawl(self, start_url: str, settings: CrawlSettings) -> CrawlResult:
+            self.called = True
+            return result_with()
+
+    crawler = TrackingCrawler()
+
+    with pytest.raises(LookupError, match="Сайт для запуска обхода не найден"):
+        asyncio.run(
+            run_crawl(engine, 999, "https://unknown.example/", crawler=crawler)
+        )
+
+    with Session(engine) as session:
+        runs = session.exec(select(CrawlRun)).all()
+        pages = session.exec(select(CrawlPageRecord)).all()
+
+    assert crawler.called is False
+    assert runs == []
+    assert pages == []
+
+
 def test_settings_counters_and_ordered_page_metadata_survive_engine_restart(
     tmp_path: Path,
 ) -> None:
