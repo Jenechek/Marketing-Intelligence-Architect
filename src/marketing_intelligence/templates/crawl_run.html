@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% if is_running %}<meta http-equiv="refresh" content="1">{% endif %}
+    <title>Ход обхода — {{ site.name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Полный обход сайта</p>
+                <h1>{{ site.name }}</h1>
+                <p class="lead">{{ site.url }}</p>
+            </div>
+        </header>
+
+        {% if duplicate %}
+        <div class="notice error" role="status">Полный обход уже выполняется. Открыт активный запуск.</div>
+        {% endif %}
+
+        <section class="content-card" aria-labelledby="run-title" aria-live="polite" data-run-status="{{ run.status }}">
+            <div class="section-heading">
+                <div>
+                    <h2 id="run-title">{% if is_running %}Обход выполняется{% else %}Обход завершён{% endif %}</h2>
+                    <p>{{ run.message }}</p>
+                </div>
+                <span class="status-badge">{{ status_title(run.status) }}</span>
+            </div>
+
+            <p class="progress-value"><strong>{{ run.processed if run.processed is not none else 0 }}</strong> / {{ run.max_pages }} страниц обработано</p>
+            {% if is_running %}
+            <progress value="{{ run.processed if run.processed is not none else 0 }}" max="{{ run.max_pages }}">{{ run.processed if run.processed is not none else 0 }} из {{ run.max_pages }}</progress>
+            {% endif %}
+
+            <dl class="summary-list">
+                {% set started_local = to_local_datetime(run.started_at) %}
+                {% set completed_local = to_local_datetime(run.completed_at) if run.completed_at else none %}
+                <div><dt>Статус</dt><dd>{{ status_title(run.status) }}</dd></div>
+                <div><dt>Начало</dt><dd><time datetime="{{ started_local.isoformat() }}">{{ started_local.strftime('%d.%m.%Y %H:%M:%S') }}</time></dd></div>
+                {% if completed_local %}<div><dt>Завершение</dt><dd><time datetime="{{ completed_local.isoformat() }}">{{ completed_local.strftime('%d.%m.%Y %H:%M:%S') }}</time></dd></div>{% endif %}
+                {% if run.requested is not none %}<div><dt>Запрошено</dt><dd>{{ run.requested }}</dd></div>{% endif %}
+                {% if run.successful is not none %}<div><dt>Успешно</dt><dd>{{ run.successful }}</dd></div>{% endif %}
+                {% if run.forbidden is not none %}<div><dt>Запрещено robots.txt</dt><dd>{{ run.forbidden }}</dd></div>{% endif %}
+                {% if run.errors is not none %}<div><dt>Ошибок страниц</dt><dd>{{ run.errors }}</dd></div>{% endif %}
+            </dl>
+
+            {% if not is_running %}
+            <div class="notice {% if run.status in ['completed', 'partial'] %}success{% else %}error{% endif %}" role="status">
+                {% if run.limited %}Достигнуто ограничение обхода.{% else %}Ограничение обхода не достигнуто.{% endif %}
+            </div>
+            {% endif %}
+            <a class="secondary-action" href="/">Вернуться к сайтам</a>
+        </section>
+    </main>
+</body>
+</html>

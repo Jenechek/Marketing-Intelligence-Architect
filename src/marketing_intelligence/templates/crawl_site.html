@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Полный обход — {{ site.name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Полный обход сайта</p>
+                <h1>{{ site.name }}</h1>
+                <p class="lead">{{ site.url }}</p>
+            </div>
+        </header>
+
+        <section class="content-card" aria-labelledby="crawl-title">
+            <div class="section-heading">
+                <div>
+                    <h2 id="crawl-title">Запустить полный обход</h2>
+                    <p>Обход продолжится в фоне. В это время можно пользоваться другими экранами.</p>
+                </div>
+            </div>
+            <dl class="summary-list">
+                <div><dt>Страниц не более</dt><dd>{{ settings.max_pages }}</dd></div>
+                <div><dt>Глубина</dt><dd>{{ settings.max_depth }}</dd></div>
+                <div><dt>Задержка</dt><dd>{{ settings.delay|int }} с</dd></div>
+                <div><dt>Ожидание ответа</dt><dd>{{ settings.timeout|int }} с</dd></div>
+                <div><dt>Одновременных запросов</dt><dd>1</dd></div>
+            </dl>
+            <form action="/sites/{{ site.id }}/crawl" method="post">
+                <input type="hidden" name="action_token" value="{{ action_token }}">
+                <button class="primary-action" type="submit">Запустить полный обход</button>
+                <a class="secondary-action" href="/">Вернуться к сайтам</a>
+            </form>
+        </section>
+    </main>
+</body>
+</html>
