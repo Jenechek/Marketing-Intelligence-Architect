@@ -111,6 +111,14 @@ h2, h3, p { margin-top: 0; }
 .site-list a { margin-top: 6px; overflow-wrap: anywhere; }
 .site-status { color: #167355; font-weight: 700; }
 .site-actions { display: flex; align-items: center; gap: 14px; }
+.narrow-shell { max-width: 820px; }
+.summary-list { display: grid; gap: 0; margin: 20px 0 24px; }
+.summary-list div { display: flex; justify-content: space-between; gap: 24px; padding: 10px 0; border-bottom: 1px solid #e4e9f0; }
+.summary-list dt { color: #536273; }
+.summary-list dd { margin: 0; font-weight: 700; text-align: right; }
+.status-badge { padding: 6px 10px; border-radius: 999px; background: #eaf0f8; font-weight: 700; }
+.progress-value { margin: 24px 0 8px; font-size: 1.1rem; }
+progress { width: 100%; height: 14px; accent-color: #245da8; }
 
 .empty-state { padding: 28px 0 8px; color: #52617a; text-align: center; }
 .empty-state h3 { color: #172033; }

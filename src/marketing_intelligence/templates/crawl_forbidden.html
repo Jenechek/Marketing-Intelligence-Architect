@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Запуск не подтверждён</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <section class="content-card">
+            <p class="eyebrow">Полный обход</p>
+            <h1>Запуск не подтверждён</h1>
+            <div class="notice error" role="alert">Токен запуска недействителен. Сеть не использовалась, новый запуск не создан.</div>
+            <a class="secondary-action" href="/sites/{{ site.id }}/crawl">Вернуться к запуску</a>
+        </section>
+    </main>
+</body>
+</html>

@@ -121,6 +121,7 @@ class CrawlResult:
 
 ClientFactory = Callable[..., Any]
 DelayFunction = Callable[[float], Awaitable[None]]
+ProgressFunction = Callable[[CrawlCounters], Awaitable[None]]
 
 
 class Crawler:
@@ -142,18 +143,21 @@ class Crawler:
         self,
         start_url: str,
         settings: CrawlSettings | None = None,
+        *,
+        progress: ProgressFunction | None = None,
     ) -> CrawlResult:
         normalized_start = normalize_http_url(start_url)
         if normalized_start is None:
             raise ValueError("Стартовый URL должен быть корректным HTTP(S)-адресом.")
         active_settings = settings or CrawlSettings()
         async with self._lock:
-            return await self._crawl_once(normalized_start, active_settings)
+            return await self._crawl_once(normalized_start, active_settings, progress)
 
     async def _crawl_once(
         self,
         start_url: str,
         settings: CrawlSettings,
+        progress: ProgressFunction | None,
     ) -> CrawlResult:
         robots_url = _robots_url(start_url)
         client_options: dict[str, Any] = {
@@ -194,12 +198,16 @@ class Crawler:
                             message="URL запрещён правилами robots.txt и не запрашивался.",
                         )
                     )
+                    if progress is not None:
+                        await progress(_count_pages(pages, requested))
                     continue
 
                 await self._delay(settings.delay)
                 requested += 1
                 page, traversal_links = await self._request_page(client, url, depth)
                 pages.append(page)
+                if progress is not None:
+                    await progress(_count_pages(pages, requested))
 
                 if not traversal_links:
                     continue

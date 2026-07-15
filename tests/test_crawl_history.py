@@ -45,13 +45,15 @@ class ResultCrawler:
         self.result = result
         self.saw_running = False
 
-    async def crawl(self, start_url: str, settings: CrawlSettings) -> CrawlResult:
+    async def crawl(
+        self, start_url: str, settings: CrawlSettings, *, progress=None
+    ) -> CrawlResult:
         current = saved_runs(self.engine)
         self.saw_running = (
             len(current) == 1
             and current[0].status == "running"
             and current[0].completed_at is None
-            and current[0].processed is None
+            and current[0].processed == 0
         )
         return self.result
 
@@ -125,7 +127,9 @@ def test_unknown_site_does_not_create_records_or_call_crawler(tmp_path: Path) ->
     class TrackingCrawler:
         called = False
 
-        async def crawl(self, start_url: str, settings: CrawlSettings) -> CrawlResult:
+        async def crawl(
+            self, start_url: str, settings: CrawlSettings, *, progress=None
+        ) -> CrawlResult:
             self.called = True
             return result_with()
 
@@ -238,7 +242,9 @@ def test_unexpected_exception_is_saved_as_failed_and_reraised(tmp_path: Path) ->
     engine = initialized_engine(tmp_path)
 
     class FailingCrawler:
-        async def crawl(self, start_url: str, settings: CrawlSettings) -> CrawlResult:
+        async def crawl(
+            self, start_url: str, settings: CrawlSettings, *, progress=None
+        ) -> CrawlResult:
             raise RuntimeError("сбой транспорта")
 
     with pytest.raises(RuntimeError, match="сбой транспорта"):
@@ -250,7 +256,7 @@ def test_unexpected_exception_is_saved_as_failed_and_reraised(tmp_path: Path) ->
     assert run.status == "failed"
     assert run.completed_at is not None
     assert "сбой транспорта" in run.message
-    assert run.processed is None
+    assert run.processed == 0
 
 
 def test_restart_recovers_only_running_as_interrupted_and_preserves_missing_values(
@@ -271,6 +277,6 @@ def test_restart_recovers_only_running_as_interrupted_and_preserves_missing_valu
     assert recovered is not None
     assert recovered.status == "interrupted"
     assert recovered.completed_at is not None
-    assert recovered.processed is None
+    assert recovered.processed == 0
     assert recovered.limited is None
     restarted.dispose()

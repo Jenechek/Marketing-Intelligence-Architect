@@ -7,6 +7,7 @@ import secrets
 
 DELETE_ACTION = "delete-site"
 CHECK_AVAILABILITY_ACTION = "check-availability"
+START_CRAWL_ACTION = "start-crawl"
 
 
 def create_action_token(secret: bytes, site_id: int, action: str) -> str:

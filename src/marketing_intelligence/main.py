@@ -1,5 +1,6 @@
 """Точка сборки минимального FastAPI-приложения."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -22,6 +23,7 @@ from .check_history import (
 )
 from .confirmation import (
     CHECK_AVAILABILITY_ACTION,
+    START_CRAWL_ACTION,
     create_action_token,
     create_delete_confirmation_token,
     validate_delete_confirmation_token,
@@ -29,7 +31,17 @@ from .confirmation import (
 )
 from .config import Settings
 from .database import build_engine, initialize_database
-from .crawl_history import count_crawl_data, recover_interrupted_runs
+from .crawl_history import (
+    ActiveCrawlRunError,
+    RUNNING_STATUS,
+    count_crawl_data,
+    crawl_status_title,
+    execute_crawl_run,
+    get_crawl_run,
+    recover_interrupted_runs,
+    start_crawl_run,
+)
+from .crawler import CrawlSettings, Crawler
 from .logging_config import configure_logging
 from .models import Site
 from .sites import add_site, delete_site, get_site, list_sites, update_site, validate_site
@@ -43,6 +55,7 @@ def create_app(
     settings: Settings | None = None,
     *,
     availability_checker: AvailabilityChecker | None = None,
+    crawler: Crawler | None = None,
 ) -> FastAPI:
     """Создать приложение с переданными или локальными настройками."""
 
@@ -60,13 +73,21 @@ def create_app(
 
         application.state.settings = active_settings
         application.state.engine = engine
+        application.state.logger = logger
         application.state.action_token_secret = secrets.token_bytes(32)
         application.state.availability_checker = availability_checker or AvailabilityChecker()
+        application.state.crawler = crawler or Crawler()
+        application.state.crawl_tasks = set()
         logger.info("Marketing Intelligence запущен")
 
         try:
             yield
         finally:
+            tasks = tuple(application.state.crawl_tasks)
+            for task in tasks:
+                task.cancel()
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
             engine.dispose()
             logger.info("Marketing Intelligence остановлен")
 
@@ -190,6 +211,52 @@ def create_app(
             status_code=403,
         )
 
+    def render_crawl_screen(request: Request, site: Site) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="crawl_site.html",
+            context={
+                "site": site,
+                "settings": CrawlSettings(),
+                "action_token": create_action_token(
+                    request.app.state.action_token_secret,
+                    site.id,
+                    START_CRAWL_ACTION,
+                ),
+            },
+        )
+
+    def render_crawl_forbidden(request: Request, site: Site) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="crawl_forbidden.html",
+            context={"site": site},
+            status_code=403,
+        )
+
+    def render_crawl_not_found(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="crawl_not_found.html",
+            status_code=404,
+        )
+
+    async def perform_crawl(run_id: int, site: Site, settings: CrawlSettings) -> None:
+        try:
+            await execute_crawl_run(
+                application.state.engine,
+                run_id,
+                site.url,
+                crawler=application.state.crawler,
+                settings=settings,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            application.state.logger.exception(
+                "Фоновый обход завершился ошибкой (run_id=%s)", run_id
+            )
+
     @application.get("/sites/{site_id}/edit", response_class=HTMLResponse)
     async def edit_site(request: Request, site_id: int) -> HTMLResponse:
         site = get_site(request.app.state.engine, site_id)
@@ -308,6 +375,70 @@ def create_app(
         result = await request.app.state.availability_checker.check(site.url)
         complete_check(request.app.state.engine, check.id, result)
         return render_check_site(request, site, result=result)
+
+    @application.get("/sites/{site_id}/crawl", response_class=HTMLResponse)
+    async def crawl_site_screen(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        return render_crawl_screen(request, site)
+
+    @application.post("/sites/{site_id}/crawl", response_class=HTMLResponse)
+    async def start_site_crawl(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+
+        raw_form = parse_qs(
+            (await request.body()).decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        action_token = raw_form.get("action_token", [""])[0]
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            START_CRAWL_ACTION,
+            action_token,
+        ):
+            return render_crawl_forbidden(request, site)
+
+        settings = CrawlSettings()
+        try:
+            run = start_crawl_run(request.app.state.engine, site_id, settings)
+        except ActiveCrawlRunError as error:
+            return RedirectResponse(
+                url=f"/crawl-runs/{error.run_id}?duplicate=1",
+                status_code=303,
+            )
+
+        task = asyncio.create_task(
+            perform_crawl(run.id, site, settings),
+            name=f"crawl-run-{run.id}",
+        )
+        request.app.state.crawl_tasks.add(task)
+        task.add_done_callback(request.app.state.crawl_tasks.discard)
+        return RedirectResponse(url=f"/crawl-runs/{run.id}", status_code=303)
+
+    @application.get("/crawl-runs/{run_id}", response_class=HTMLResponse)
+    async def crawl_run_screen(request: Request, run_id: int) -> HTMLResponse:
+        run = get_crawl_run(request.app.state.engine, run_id)
+        if run is None:
+            return render_crawl_not_found(request)
+        site = get_site(request.app.state.engine, run.site_id)
+        if site is None:
+            return render_crawl_not_found(request)
+        return templates.TemplateResponse(
+            request=request,
+            name="crawl_run.html",
+            context={
+                "site": site,
+                "run": run,
+                "is_running": run.status == RUNNING_STATUS,
+                "duplicate": request.query_params.get("duplicate") == "1",
+                "to_local_datetime": to_local_datetime,
+                "status_title": crawl_status_title,
+            },
+        )
 
     return application
 
