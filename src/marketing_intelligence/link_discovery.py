@@ -30,16 +30,16 @@ def extract_internal_links(
     html: str,
     start_url: str,
     *,
-    limit: int = MAX_DISCOVERED_LINKS,
+    limit: int | None = MAX_DISCOVERED_LINKS,
 ) -> tuple[tuple[str, ...], bool]:
     """Извлечь нормализованные внутренние HTTP(S)-ссылки без перехода по ним."""
 
-    if limit < 1:
+    if limit is not None and limit < 1:
         raise ValueError("Лимит ссылок должен быть положительным.")
-    normalized_start = _normalize_http_url(start_url)
+    normalized_start = normalize_http_url(start_url)
     if normalized_start is None:
         raise ValueError("Стартовый URL должен быть корректным HTTP(S)-адресом.")
-    start_origin = _origin(normalized_start)
+    start_origin = url_origin(normalized_start)
 
     parser = _HrefParser()
     parser.feed(html)
@@ -49,16 +49,16 @@ def extract_internal_links(
     seen: set[str] = set()
     limited = False
     for href in parser.hrefs:
-        candidate = _normalize_http_url(urljoin(normalized_start, href.strip()))
+        candidate = normalize_http_url(urljoin(normalized_start, href.strip()))
         if (
             candidate is None
-            or _origin(candidate) != start_origin
+            or url_origin(candidate) != start_origin
             or candidate == normalized_start
             or candidate in seen
         ):
             continue
         seen.add(candidate)
-        if len(links) < limit:
+        if limit is None or len(links) < limit:
             links.append(candidate)
         else:
             limited = True
@@ -66,12 +66,16 @@ def extract_internal_links(
     return tuple(links), limited
 
 
-def _origin(url: str) -> tuple[str, str, int | None]:
+def url_origin(url: str) -> tuple[str, str, int | None]:
+    """Вернуть exact origin уже нормализованного HTTP(S)-URL."""
+
     parsed = urlsplit(url)
     return parsed.scheme, parsed.hostname or "", parsed.port
 
 
-def _normalize_http_url(url: str) -> str | None:
+def normalize_http_url(url: str) -> str | None:
+    """Нормализовать HTTP(S)-URL или отклонить небезопасный адрес."""
+
     try:
         parsed = urlsplit(url)
         scheme = parsed.scheme.lower()

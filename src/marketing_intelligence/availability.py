@@ -1,25 +1,24 @@
-"""Безопасная проверка robots.txt и одной стартовой страницы."""
+"""Адаптер существующей проверки доступности к ядру обхода."""
 
 import asyncio
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
-from urllib.parse import urlsplit, urlunsplit
-from urllib.robotparser import RobotFileParser
 
 import httpx
 
-from .link_discovery import extract_internal_links
-
-
-USER_AGENT = (
-    "MarketingIntelligenceBot/0.1 "
-    "(+https://github.com/Jenechek/Marketing-Intelligence-Architect)"
+from .crawler import (
+    MAX_HTML_BYTES,
+    REQUEST_DELAY_SECONDS,
+    REQUEST_TIMEOUT_SECONDS,
+    USER_AGENT,
+    ClientFactory,
+    CrawlResult,
+    CrawlSettings,
+    Crawler,
+    CrawlStatus,
+    DelayFunction,
+    PageOutcome,
 )
-REQUEST_TIMEOUT_SECONDS = 15.0
-REQUEST_DELAY_SECONDS = 1.0
-MAX_HTML_BYTES = 2 * 1024 * 1024
 
 
 class AvailabilityStatus(StrEnum):
@@ -58,12 +57,8 @@ class AvailabilityResult:
     discovery_message: str | None = None
 
 
-ClientFactory = Callable[..., Any]
-DelayFunction = Callable[[float], Awaitable[None]]
-
-
 class AvailabilityChecker:
-    """Выполнить не более одной проверки одновременно в процессе."""
+    """Сохранить поведение проверки одной страницы через общее ядро."""
 
     def __init__(
         self,
@@ -72,182 +67,106 @@ class AvailabilityChecker:
         transport: httpx.AsyncBaseTransport | None = None,
         delay: DelayFunction = asyncio.sleep,
     ) -> None:
-        self._client_factory = client_factory
-        self._transport = transport
-        self._delay = delay
-        self._lock = asyncio.Lock()
+        self._crawler = Crawler(
+            client_factory=client_factory,
+            transport=transport,
+            delay=delay,
+        )
 
     async def check(self, start_url: str) -> AvailabilityResult:
-        async with self._lock:
-            return await self._check_once(start_url)
+        crawl_result = await self._crawler.crawl(
+            start_url,
+            CrawlSettings(
+                max_pages=1,
+                max_depth=0,
+                delay=REQUEST_DELAY_SECONDS,
+                timeout=REQUEST_TIMEOUT_SECONDS,
+                user_agent=USER_AGENT,
+            ),
+        )
+        return _to_availability_result(crawl_result)
 
-    async def _check_once(self, start_url: str) -> AvailabilityResult:
-        robots_url = _robots_url(start_url)
-        robots_status: int | None = None
-        client_options: dict[str, Any] = {
-            "headers": {"User-Agent": USER_AGENT},
-            "timeout": REQUEST_TIMEOUT_SECONDS,
-            "follow_redirects": False,
-        }
-        if self._transport is not None:
-            client_options["transport"] = self._transport
 
-        try:
-            async with self._client_factory(**client_options) as client:
-                robots_result = await self._check_robots(client, robots_url, start_url)
-                if isinstance(robots_result, AvailabilityResult):
-                    return robots_result
-
-                robots_status = robots_result
-                await self._delay(REQUEST_DELAY_SECONDS)
-                page_result = await self._check_start_page(client, start_url)
-                return replace(page_result, robots_status=robots_result)
-        except httpx.TimeoutException:
-            return replace(
-                _network_error(
-                    "Сервер не ответил за 15 секунд. Проверку можно повторить позже."
-                ),
-                robots_status=robots_status,
-            )
-        except httpx.RequestError:
-            return replace(
-                _network_error(
-                    "Не удалось подключиться к сайту. Проверку можно повторить позже."
-                ),
-                robots_status=robots_status,
-            )
-
-    async def _check_robots(
-        self,
-        client: httpx.AsyncClient,
-        robots_url: str,
-        start_url: str,
-    ) -> AvailabilityResult | int:
-        response = await client.get(robots_url)
-        status = response.status_code
-
-        if 300 <= status < 400:
-            return AvailabilityResult(
-                AvailabilityStatus.REDIRECT,
-                "Перенаправление",
-                "robots.txt перенаправляет запрос. Стартовая страница не запрашивалась.",
-                robots_status=status,
-            )
-        if status == 404:
-            return status
-        if 200 <= status < 300:
-            parser = RobotFileParser()
-            parser.set_url(robots_url)
-            parser.parse(response.text.splitlines())
-            if parser.can_fetch(USER_AGENT, start_url):
-                return status
-            return AvailabilityResult(
-                AvailabilityStatus.FORBIDDEN,
-                "Запрещено правилами robots.txt",
-                "Правила сайта запрещают запрос стартовой страницы для этого робота.",
-                robots_status=status,
-            )
+def _to_availability_result(crawl: CrawlResult) -> AvailabilityResult:
+    if crawl.status is CrawlStatus.ROBOTS_REDIRECT:
+        return AvailabilityResult(
+            AvailabilityStatus.REDIRECT,
+            "Перенаправление",
+            "robots.txt перенаправляет запрос. Стартовая страница не запрашивалась.",
+            robots_status=crawl.robots_status,
+        )
+    if crawl.status is CrawlStatus.ROBOTS_DEFERRED:
         return AvailabilityResult(
             AvailabilityStatus.DEFERRED,
             "Проверка отложена",
             "robots.txt временно недоступен или вернул неподдерживаемый ответ. Стартовая страница не запрашивалась.",
-            robots_status=status,
+            robots_status=crawl.robots_status,
+        )
+    if crawl.status is CrawlStatus.ROBOTS_TIMEOUT:
+        return _network_error(
+            "Сервер не ответил за 15 секунд. Проверку можно повторить позже.",
+            crawl.robots_status,
+        )
+    if crawl.status is CrawlStatus.ROBOTS_NETWORK_ERROR:
+        return _network_error(
+            "Не удалось подключиться к сайту. Проверку можно повторить позже.",
+            crawl.robots_status,
         )
 
-    async def _check_start_page(
-        self,
-        client: httpx.AsyncClient,
-        start_url: str,
-    ) -> AvailabilityResult:
-        request = client.build_request("GET", start_url)
-        response = await client.send(request, stream=True)
-        try:
-            status = response.status_code
-            if 300 <= status < 400:
-                return AvailabilityResult(
-                    AvailabilityStatus.REDIRECT,
-                    "Перенаправление",
-                    "Стартовая страница перенаправляет запрос. Переход не выполнялся.",
-                    page_status=status,
-                )
-            if 200 <= status < 300:
-                discovery = await _discover_from_response(response, start_url)
-                return AvailabilityResult(
-                    AvailabilityStatus.AVAILABLE,
-                    "Доступно",
-                    "robots.txt разрешает запрос, а стартовая страница ответила без перенаправления.",
-                    page_status=status,
-                    **discovery,
-                )
-            return AvailabilityResult(
-                AvailabilityStatus.DEFERRED,
-                "Проверка отложена",
-                "Стартовая страница вернула ответ, который нельзя считать подтверждением доступности.",
-                page_status=status,
-            )
-        finally:
-            await response.aclose()
+    page = crawl.pages[0]
+    if page.outcome is PageOutcome.FORBIDDEN:
+        return AvailabilityResult(
+            AvailabilityStatus.FORBIDDEN,
+            "Запрещено правилами robots.txt",
+            "Правила сайта запрещают запрос стартовой страницы для этого робота.",
+            robots_status=crawl.robots_status,
+        )
+    if page.outcome is PageOutcome.REDIRECT:
+        return AvailabilityResult(
+            AvailabilityStatus.REDIRECT,
+            "Перенаправление",
+            "Стартовая страница перенаправляет запрос. Переход не выполнялся.",
+            robots_status=crawl.robots_status,
+            page_status=page.http_status,
+        )
+    if page.outcome is PageOutcome.HTTP_ERROR:
+        return AvailabilityResult(
+            AvailabilityStatus.DEFERRED,
+            "Проверка отложена",
+            "Стартовая страница вернула ответ, который нельзя считать подтверждением доступности.",
+            robots_status=crawl.robots_status,
+            page_status=page.http_status,
+        )
+    if page.outcome is PageOutcome.TIMEOUT:
+        return _network_error(
+            "Сервер не ответил за 15 секунд. Проверку можно повторить позже.",
+            crawl.robots_status,
+        )
+    if page.outcome is PageOutcome.NETWORK_ERROR:
+        return _network_error(
+            "Не удалось подключиться к сайту. Проверку можно повторить позже.",
+            crawl.robots_status,
+        )
+
+    return AvailabilityResult(
+        AvailabilityStatus.AVAILABLE,
+        "Доступно",
+        "robots.txt разрешает запрос, а стартовая страница ответила без перенаправления.",
+        robots_status=crawl.robots_status,
+        page_status=page.http_status,
+        discovered_links=page.discovered_links,
+        links_limited=page.links_limited,
+        discovery_message=page.message,
+    )
 
 
-def _robots_url(start_url: str) -> str:
-    parsed = urlsplit(start_url)
-    return urlunsplit((parsed.scheme, parsed.netloc, "/robots.txt", "", ""))
-
-
-async def _discover_from_response(
-    response: httpx.Response,
-    start_url: str,
-) -> dict[str, Any]:
-    content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-    if content_type not in {"text/html", "application/xhtml+xml"}:
-        return {
-            "discovery_message": "Стартовая страница не является HTML. Внутренние ссылки не извлекались."
-        }
-
-    declared_length = response.headers.get("content-length")
-    if declared_length:
-        try:
-            if int(declared_length) > MAX_HTML_BYTES:
-                return {
-                    "discovery_message": "HTML-страница превышает 2 МиБ. Внутренние ссылки не извлекались."
-                }
-        except ValueError:
-            pass
-
-    content = bytearray()
-    async for chunk in response.aiter_bytes():
-        remaining = MAX_HTML_BYTES - len(content)
-        if len(chunk) > remaining:
-            return {
-                "discovery_message": "HTML-страница превышает 2 МиБ. Внутренние ссылки не извлекались."
-            }
-        content.extend(chunk)
-
-    try:
-        encoding = response.encoding or "utf-8"
-        html = bytes(content).decode(encoding, errors="replace")
-        links, limited = extract_internal_links(html, start_url)
-    except Exception:
-        return {
-            "discovery_message": "Не удалось разобрать HTML стартовой страницы. Внутренние ссылки не извлечены."
-        }
-
-    if not links:
-        message = "На стартовой HTML-странице внутренние ссылки не найдены."
-    elif limited:
-        message = "Показаны первые 200 уникальных внутренних ссылок. Список ограничен."
-    else:
-        message = f"Найдено внутренних ссылок: {len(links)}."
-    return {
-        "discovered_links": links,
-        "links_limited": limited,
-        "discovery_message": message,
-    }
-
-
-def _network_error(message: str) -> AvailabilityResult:
+def _network_error(
+    message: str,
+    robots_status: int | None,
+) -> AvailabilityResult:
     return AvailabilityResult(
         AvailabilityStatus.NETWORK_ERROR,
         "Сетевая ошибка",
         message,
+        robots_status=robots_status,
     )
