@@ -31,9 +31,23 @@
                 {% if result.robots_status %}<p>Ответ robots.txt: HTTP {{ result.robots_status }}.</p>{% endif %}
                 {% if result.page_status %}<p>Ответ стартовой страницы: HTTP {{ result.page_status }}.</p>{% endif %}
             </div>
+            <details class="link-results" open>
+                <summary><strong>Внутренние ссылки стартовой страницы</strong></summary>
+                <div class="link-results-details">
+                    <p>{{ result.discovery_message }}</p>
+                    {% if result.discovered_links %}
+                    <ol class="discovered-links">
+                        {% for link in result.discovered_links %}
+                        <li><a href="{{ link }}" target="_blank" rel="noopener noreferrer">{{ link }}</a></li>
+                        {% endfor %}
+                    </ol>
+                    {% endif %}
+                    {% if result.links_limited %}<p><strong>Ограничение:</strong> показано не более 200 ссылок.</p>{% endif %}
+                </div>
+            </details>
             {% endif %}
 
-            <p>Проверка не обходит ссылки, не выполняет JavaScript и не отправляет формы. Результат сохраняется в локальной истории.</p>
+            <p>Проверка не переходит по найденным ссылкам, не выполняет JavaScript и не отправляет формы. HTML и найденные ссылки не сохраняются.</p>
 
             <form action="/sites/{{ site.id }}/check" method="post">
                 <input type="hidden" name="action_token" value="{{ action_token }}">
