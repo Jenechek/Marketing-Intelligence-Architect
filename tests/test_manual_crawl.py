@@ -9,15 +9,17 @@ from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from marketing_intelligence.config import Settings
+from marketing_intelligence.crawl_history import start_crawl_run
 from marketing_intelligence.crawler import (
     CrawlCounters,
     CrawlPageResult,
     CrawlResult,
+    CrawlSettings,
     CrawlStatus,
     PageOutcome,
 )
 from marketing_intelligence.main import create_app
-from marketing_intelligence.models import CrawlPageRecord, CrawlRun
+from marketing_intelligence.models import CrawlPageRecord, CrawlRun, Site
 
 
 def build_app(tmp_path: Path, crawler=None):
@@ -48,6 +50,14 @@ def crawl_token(client: TestClient, site_id: int = 1) -> str:
     assert "Ожидание ответа</dt><dd>15 с" in response.text
     assert "Одновременных запросов</dt><dd>1" in response.text
     match = re.search(r'name="action_token" value="([^"]+)"', response.text)
+    assert match is not None
+    return match.group(1)
+
+
+def delete_token(client: TestClient, site_id: int) -> str:
+    response = client.get(f"/sites/{site_id}/delete")
+    assert response.status_code == 200
+    match = re.search(r'name="confirmation_token" value="([^"]+)"', response.text)
     assert match is not None
     return match.group(1)
 
@@ -219,6 +229,112 @@ def test_shutdown_cancels_tracked_task_and_next_startup_marks_interrupted(
     assert 'data-run-status="interrupted"' in result.text
     assert "Прерван" in result.text
     assert 'http-equiv="refresh"' not in result.text
+
+
+def test_running_crawl_blocks_only_its_site_deletion_and_prevents_data_mixing(
+    tmp_path: Path,
+) -> None:
+    crawler = BlockingCrawler()
+    app = build_app(tmp_path, crawler)
+
+    with TestClient(app) as client:
+        add_site(client, "https://old.example/")
+        client.post(
+            "/sites",
+            data={"name": "Удаляемый второй", "url": "https://second.example/"},
+        )
+        old_delete_token = delete_token(client, 1)
+        second_delete_token = delete_token(client, 2)
+        started = client.post(
+            "/sites/1/crawl",
+            data={"action_token": crawl_token(client, 1)},
+            follow_redirects=False,
+        )
+        assert started.status_code == 303
+        assert crawler.started.wait(2)
+
+        blocked_get = client.get("/sites/1/delete")
+        blocked_post = client.post(
+            "/sites/1/delete",
+            data={"confirmation_token": old_delete_token},
+            follow_redirects=False,
+        )
+        second_delete = client.post(
+            "/sites/2/delete",
+            data={"confirmation_token": second_delete_token},
+            follow_redirects=False,
+        )
+        client.post(
+            "/sites",
+            data={"name": "Новый сайт", "url": "https://new.example/"},
+        )
+
+        assert blocked_get.status_code == 200
+        assert "Дождитесь завершения обхода" in blocked_get.text
+        assert 'href="/crawl-runs/1"' in blocked_get.text
+        assert 'method="post"' not in blocked_get.text
+        assert 'name="confirmation_token"' not in blocked_get.text
+        assert blocked_post.status_code == 409
+        assert "Сайт «Тестовый сайт» не удалён" in blocked_post.text
+        assert second_delete.status_code == 303
+
+        with Session(app.state.engine) as session:
+            sites_while_running = list(session.exec(select(Site).order_by(Site.id)))
+            run_while_running = session.get(CrawlRun, 1)
+        assert [(site.id, site.url) for site in sites_while_running] == [
+            (1, "https://old.example/"),
+            (2, "https://new.example/"),
+        ]
+        assert run_while_running is not None
+        assert run_while_running.site_id == 1
+
+        crawler.release.set()
+        for _ in range(100):
+            completed = client.get("/crawl-runs/1")
+            if 'data-run-status="completed"' in completed.text:
+                break
+            time.sleep(0.01)
+
+        with Session(app.state.engine) as session:
+            records = list(session.exec(select(CrawlPageRecord)).all())
+        assert [record.url for record in records] == ["https://old.example/"]
+        assert all("new.example" not in record.url for record in records)
+
+        completed_delete_token = delete_token(client, 1)
+        completed_delete = client.post(
+            "/sites/1/delete",
+            data={"confirmation_token": completed_delete_token},
+            follow_redirects=False,
+        )
+        remaining = client.get("/")
+
+    assert completed_delete.status_code == 303
+    assert "https://old.example/" not in remaining.text
+    assert "https://new.example/" in remaining.text
+
+
+def test_delete_guard_uses_persisted_running_status_without_background_task(
+    tmp_path: Path,
+) -> None:
+    app = build_app(tmp_path)
+
+    with TestClient(app) as client:
+        add_site(client)
+        token = delete_token(client, 1)
+        run = start_crawl_run(app.state.engine, 1, CrawlSettings(delay=0))
+        get_response = client.get("/sites/1/delete")
+        post_response = client.post(
+            "/sites/1/delete",
+            data={"confirmation_token": token},
+        )
+
+    assert run.id == 1
+    assert get_response.status_code == 200
+    assert 'href="/crawl-runs/1"' in get_response.text
+    assert post_response.status_code == 409
+    with Session(app.state.engine) as session:
+        assert session.get(Site, 1) is not None
+        assert session.get(CrawlRun, 1) is not None
 
 
 def test_real_loopback_crawl_finishes_through_server_ui(tmp_path: Path) -> None:

@@ -164,6 +164,20 @@ def get_crawl_run(engine: Engine, run_id: int) -> CrawlRun | None:
         return session.get(CrawlRun, run_id)
 
 
+def get_running_crawl_run(engine: Engine, site_id: int) -> CrawlRun | None:
+    """Получить сохранённый активный запуск выбранного сайта."""
+
+    with Session(engine) as session:
+        return session.exec(
+            select(CrawlRun)
+            .where(
+                CrawlRun.site_id == site_id,
+                CrawlRun.status == RUNNING_STATUS,
+            )
+            .order_by(CrawlRun.started_at, CrawlRun.id)
+        ).first()
+
+
 def recover_interrupted_runs(engine: Engine) -> int:
     """Пометить незавершённые запуски прошлого процесса как прерванные."""
 

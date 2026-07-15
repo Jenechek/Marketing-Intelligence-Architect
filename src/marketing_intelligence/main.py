@@ -38,13 +38,22 @@ from .crawl_history import (
     crawl_status_title,
     execute_crawl_run,
     get_crawl_run,
+    get_running_crawl_run,
     recover_interrupted_runs,
     start_crawl_run,
 )
 from .crawler import CrawlSettings, Crawler
 from .logging_config import configure_logging
 from .models import Site
-from .sites import add_site, delete_site, get_site, list_sites, update_site, validate_site
+from .sites import (
+    ActiveSiteCrawlError,
+    add_site,
+    delete_site,
+    get_site,
+    list_sites,
+    update_site,
+    validate_site,
+)
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -211,6 +220,20 @@ def create_app(
             status_code=403,
         )
 
+    def render_delete_running(
+        request: Request,
+        site: Site,
+        run_id: int,
+        *,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="delete_running.html",
+            context={"site": site, "run_id": run_id},
+            status_code=status_code,
+        )
+
     def render_crawl_screen(request: Request, site: Site) -> HTMLResponse:
         return templates.TemplateResponse(
             request=request,
@@ -303,6 +326,9 @@ def create_app(
         site = get_site(request.app.state.engine, site_id)
         if site is None:
             return render_site_not_found(request)
+        active_run = get_running_crawl_run(request.app.state.engine, site_id)
+        if active_run is not None:
+            return render_delete_running(request, site, active_run.id)
         crawl_run_count, crawl_page_count = count_crawl_data(
             request.app.state.engine, site_id
         )
@@ -341,8 +367,16 @@ def create_app(
         ):
             return render_delete_forbidden(request, site)
 
-        if not delete_site(request.app.state.engine, site_id):
-            return render_site_not_found(request)
+        try:
+            if not delete_site(request.app.state.engine, site_id):
+                return render_site_not_found(request)
+        except ActiveSiteCrawlError as error:
+            return render_delete_running(
+                request,
+                site,
+                error.run_id,
+                status_code=409,
+            )
         return RedirectResponse(url="/?deleted=1", status_code=303)
 
     @application.get("/sites/{site_id}/check", response_class=HTMLResponse)

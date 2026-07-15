@@ -2,11 +2,19 @@
 
 from urllib.parse import urlsplit
 
-from sqlalchemy import delete
+from sqlalchemy import delete, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from .models import AvailabilityCheck, CrawlPageRecord, CrawlRun, Site
+
+
+class ActiveSiteCrawlError(RuntimeError):
+    """Удаление сайта запрещено, пока его полный обход выполняется."""
+
+    def __init__(self, run_id: int) -> None:
+        super().__init__("Нельзя удалить сайт во время полного обхода.")
+        self.run_id = run_id
 
 
 def validate_site(name: str, url: str) -> dict[str, str]:
@@ -88,9 +96,20 @@ def delete_site(engine: Engine, site_id: int) -> bool:
     """Окончательно удалить выбранный сайт и его историю одной транзакцией."""
 
     with Session(engine) as session:
+        session.exec(text("BEGIN IMMEDIATE"))
         site = session.get(Site, site_id)
         if site is None:
             return False
+
+        active_run_id = session.exec(
+            select(CrawlRun.id).where(
+                CrawlRun.site_id == site_id,
+                CrawlRun.status == "running",
+            )
+        ).first()
+        if active_run_id is not None:
+            session.rollback()
+            raise ActiveSiteCrawlError(active_run_id)
 
         session.exec(
             delete(AvailabilityCheck).where(AvailabilityCheck.site_id == site_id)
