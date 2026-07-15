@@ -77,6 +77,7 @@ class AvailabilityChecker:
 
     async def _check_once(self, start_url: str) -> AvailabilityResult:
         robots_url = _robots_url(start_url)
+        robots_status: int | None = None
         client_options: dict[str, Any] = {
             "headers": {"User-Agent": USER_AGENT},
             "timeout": REQUEST_TIMEOUT_SECONDS,
@@ -91,13 +92,24 @@ class AvailabilityChecker:
                 if isinstance(robots_result, AvailabilityResult):
                     return robots_result
 
+                robots_status = robots_result
                 await self._delay(REQUEST_DELAY_SECONDS)
                 page_result = await self._check_start_page(client, start_url)
                 return replace(page_result, robots_status=robots_result)
         except httpx.TimeoutException:
-            return _network_error("Сервер не ответил за 15 секунд. Проверку можно повторить позже.")
+            return replace(
+                _network_error(
+                    "Сервер не ответил за 15 секунд. Проверку можно повторить позже."
+                ),
+                robots_status=robots_status,
+            )
         except httpx.RequestError:
-            return _network_error("Не удалось подключиться к сайту. Проверку можно повторить позже.")
+            return replace(
+                _network_error(
+                    "Не удалось подключиться к сайту. Проверку можно повторить позже."
+                ),
+                robots_status=robots_status,
+            )
 
     async def _check_robots(
         self,

@@ -54,15 +54,17 @@
             {% if history %}
             <div class="history-list">
                 {% for check in history %}
+                {% set started_local = to_local_datetime(check.started_at) %}
+                {% set completed_local = to_local_datetime(check.completed_at) if check.completed_at else none %}
                 <details class="history-item">
                     <summary>
                         <strong>{{ status_title(check.status) }}</strong>
-                        <time datetime="{{ check.started_at.isoformat() }}">{{ check.started_at.strftime('%d.%m.%Y %H:%M:%S') }}</time>
+                        <time datetime="{{ started_local.isoformat() }}">{{ started_local.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)') }}</time>
                     </summary>
                     <div class="history-details">
                         <p>{{ check.message }}</p>
-                        <p>Начало: {{ check.started_at.strftime('%d.%m.%Y %H:%M:%S') }}.</p>
-                        <p>Завершение: {% if check.completed_at %}{{ check.completed_at.strftime('%d.%m.%Y %H:%M:%S') }}{% else %}не зафиксировано{% endif %}.</p>
+                        <p>Начало: {{ started_local.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)') }}.</p>
+                        <p>Завершение: {% if completed_local %}{{ completed_local.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)') }}{% else %}не зафиксировано{% endif %}.</p>
                         {% if check.robots_status is not none %}<p>Ответ robots.txt: HTTP {{ check.robots_status }}.</p>{% endif %}
                         {% if check.page_status is not none %}<p>Ответ стартовой страницы: HTTP {{ check.page_status }}.</p>{% endif %}
                     </div>

@@ -1,9 +1,9 @@
 """Хранение истории ручных проверок доступности."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 
-from sqlalchemy.engine import Engine
 from sqlalchemy import func
+from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from .availability import AvailabilityResult
@@ -87,3 +87,13 @@ def format_check_count(count: int) -> str:
     else:
         word = "записей"
     return f"{count} {word}"
+
+
+def to_local_datetime(
+    value: datetime,
+    target_timezone: tzinfo | None = None,
+) -> datetime:
+    """Преобразовать сохранённое UTC-время в локальный часовой пояс."""
+
+    utc_value = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    return utc_value.astimezone(target_timezone)

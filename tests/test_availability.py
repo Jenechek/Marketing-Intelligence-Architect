@@ -1,4 +1,6 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 import re
 
@@ -8,6 +10,7 @@ import httpx
 import pytest
 from sqlmodel import Session, select
 
+import marketing_intelligence.main as main_module
 from marketing_intelligence.availability import (
     AvailabilityChecker,
     AvailabilityStatus,
@@ -16,6 +19,7 @@ from marketing_intelligence.availability import (
     USER_AGENT,
 )
 from marketing_intelligence.config import Settings
+from marketing_intelligence.check_history import to_local_datetime
 from marketing_intelligence.main import create_app
 from marketing_intelligence.models import AvailabilityCheck
 
@@ -353,6 +357,64 @@ def test_network_error_is_saved_without_invented_http_codes(tmp_path: Path) -> N
     assert checks[0].robots_status is None
     assert checks[0].page_status is None
     assert checks[0].completed_at is not None
+
+
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+def test_page_error_keeps_successful_robots_http_code(
+    tmp_path: Path,
+    error_type: type[httpx.RequestError],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, content=b"User-agent: *\nAllow: /")
+        raise error_type("page failure", request=request)
+
+    app, _, requests = build_test_app(tmp_path, handler)
+    with TestClient(app) as client:
+        add_site(client)
+        response = run_check(client)
+        checks = saved_checks(app)
+
+    assert response.status_code == 200
+    assert "Сетевая ошибка" in response.text
+    assert [request.url.path for request in requests] == ["/robots.txt", "/start"]
+    assert len(checks) == 1
+    assert checks[0].status == AvailabilityStatus.NETWORK_ERROR.value
+    assert checks[0].robots_status == 200
+    assert checks[0].page_status is None
+
+
+def test_history_formats_stored_utc_in_local_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moscow_timezone = timezone(timedelta(hours=3), name="MSK")
+    monkeypatch.setattr(
+        main_module,
+        "to_local_datetime",
+        partial(to_local_datetime, target_timezone=moscow_timezone),
+    )
+    app, _, _ = build_test_app(tmp_path, lambda request: httpx.Response(500))
+    stored_time = datetime(2026, 7, 15, 12, 30)
+
+    with TestClient(app) as client:
+        add_site(client)
+        with Session(app.state.engine) as session:
+            session.add(
+                AvailabilityCheck(
+                    site_id=1,
+                    started_at=stored_time,
+                    completed_at=stored_time,
+                    status=AvailabilityStatus.AVAILABLE.value,
+                    message="Проверка времени",
+                )
+            )
+            session.commit()
+        response = client.get("/sites/1/check")
+
+    assert response.status_code == 200
+    assert "15.07.2026 15:30:00 MSK (UTC+0300)" in response.text
+    assert 'datetime="2026-07-15T15:30:00+03:00"' in response.text
 
 
 def test_history_survives_restart_and_is_newest_first(tmp_path: Path) -> None:

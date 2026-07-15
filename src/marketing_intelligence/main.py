@@ -18,6 +18,7 @@ from .check_history import (
     format_check_count,
     list_checks,
     start_check,
+    to_local_datetime,
 )
 from .confirmation import (
     CHECK_AVAILABILITY_ACTION,
@@ -169,6 +170,7 @@ def create_app(
                 "result": result,
                 "history": list_checks(request.app.state.engine, site.id),
                 "status_title": status_title,
+                "to_local_datetime": to_local_datetime,
                 "action_token": create_action_token(
                     request.app.state.action_token_secret,
                     site.id,
