@@ -31,10 +31,10 @@
                 {% if result.robots_status %}<p>Ответ robots.txt: HTTP {{ result.robots_status }}.</p>{% endif %}
                 {% if result.page_status %}<p>Ответ стартовой страницы: HTTP {{ result.page_status }}.</p>{% endif %}
             </div>
-            <details class="link-results" open>
-                <summary><strong>Внутренние ссылки стартовой страницы</strong></summary>
+            {% if result.discovery_message %}
+            <details class="link-results">
+                <summary><strong>Внутренние ссылки стартовой страницы:</strong> {{ result.discovery_message }}</summary>
                 <div class="link-results-details">
-                    <p>{{ result.discovery_message }}</p>
                     {% if result.discovered_links %}
                     <ol class="discovered-links">
                         {% for link in result.discovered_links %}
@@ -42,9 +42,9 @@
                         {% endfor %}
                     </ol>
                     {% endif %}
-                    {% if result.links_limited %}<p><strong>Ограничение:</strong> показано не более 200 ссылок.</p>{% endif %}
                 </div>
             </details>
+            {% endif %}
             {% endif %}
 
             <p>Проверка не переходит по найденным ссылкам, не выполняет JavaScript и не отправляет формы. HTML и найденные ссылки не сохраняются.</p>

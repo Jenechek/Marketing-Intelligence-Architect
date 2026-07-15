@@ -4,11 +4,9 @@ from fastapi.testclient import TestClient
 import httpx
 import pytest
 
-import marketing_intelligence.availability as availability_module
-from marketing_intelligence.availability import (
-    MAX_HTML_BYTES,
-    extract_internal_links,
-)
+import marketing_intelligence.link_discovery as link_discovery_module
+from marketing_intelligence.availability import MAX_HTML_BYTES
+from marketing_intelligence.link_discovery import extract_internal_links
 from test_availability import add_site, build_test_app, run_check
 
 
@@ -86,6 +84,11 @@ def test_successful_html_is_read_and_links_are_shown_without_requesting_them(
 
     assert response.status_code == 200
     assert "Найдено внутренних ссылок: 2" in response.text
+    assert '<details class="link-results">' in response.text
+    assert '<details class="link-results" open>' not in response.text
+    assert response.text.index("Найдено внутренних ссылок: 2") < response.text.index(
+        '<ol class="discovered-links">'
+    )
     assert "https://example.com/one" in response.text
     assert "https://example.com/two" in response.text
     assert [request.url.path for request in requests] == ["/robots.txt", "/start"]
@@ -156,7 +159,7 @@ def test_html_parse_failure_shows_controlled_message(
     def fail_to_parse(self, data: str) -> None:
         raise ValueError("controlled parser failure")
 
-    monkeypatch.setattr(availability_module._HrefParser, "feed", fail_to_parse)
+    monkeypatch.setattr(link_discovery_module._HrefParser, "feed", fail_to_parse)
     app, _, _ = build_test_app(tmp_path, handler)
     with TestClient(app) as client:
         add_site(client)
@@ -179,3 +182,50 @@ def test_robots_forbid_prevents_html_and_link_requests(tmp_path: Path) -> None:
 
     assert "Запрещено правилами robots.txt" in response.text
     assert [request.url.path for request in requests] == ["/robots.txt"]
+    assert 'class="link-results"' not in response.text
+    assert ">None<" not in response.text
+
+
+@pytest.mark.parametrize(
+    ("robots_response", "page_response"),
+    [
+        (httpx.Response(302, headers={"Location": "/other"}), None),
+        (httpx.Response(503), None),
+        (httpx.Response(404), httpx.Response(302, headers={"Location": "/other"})),
+        (httpx.Response(404), httpx.Response(500)),
+    ],
+)
+def test_unsuccessful_check_does_not_show_discovery_block(
+    tmp_path: Path,
+    robots_response: httpx.Response,
+    page_response: httpx.Response | None,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return robots_response
+        assert page_response is not None
+        return page_response
+
+    app, _, _ = build_test_app(tmp_path, handler)
+    with TestClient(app) as client:
+        add_site(client)
+        response = run_check(client)
+
+    assert response.status_code == 200
+    assert 'class="link-results"' not in response.text
+    assert ">None<" not in response.text
+
+
+def test_network_error_does_not_show_discovery_block(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("controlled failure", request=request)
+
+    app, _, _ = build_test_app(tmp_path, handler)
+    with TestClient(app) as client:
+        add_site(client)
+        response = run_check(client)
+
+    assert response.status_code == 200
+    assert "Сетевая ошибка" in response.text
+    assert 'class="link-results"' not in response.text
+    assert ">None<" not in response.text
