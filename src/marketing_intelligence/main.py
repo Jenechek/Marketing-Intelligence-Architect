@@ -29,6 +29,7 @@ from .confirmation import (
 )
 from .config import Settings
 from .database import build_engine, initialize_database
+from .crawl_history import count_crawl_data, recover_interrupted_runs
 from .logging_config import configure_logging
 from .models import Site
 from .sites import add_site, delete_site, get_site, list_sites, update_site, validate_site
@@ -55,6 +56,7 @@ def create_app(
         logger = configure_logging(active_settings.logs_dir)
         engine = build_engine(active_settings.database_url)
         initialize_database(engine)
+        recover_interrupted_runs(engine)
 
         application.state.settings = active_settings
         application.state.engine = engine
@@ -234,6 +236,9 @@ def create_app(
         site = get_site(request.app.state.engine, site_id)
         if site is None:
             return render_site_not_found(request)
+        crawl_run_count, crawl_page_count = count_crawl_data(
+            request.app.state.engine, site_id
+        )
         return templates.TemplateResponse(
             request=request,
             name="delete_site.html",
@@ -242,6 +247,8 @@ def create_app(
                 "history_count_text": format_check_count(
                     count_checks(request.app.state.engine, site_id)
                 ),
+                "crawl_run_count": crawl_run_count,
+                "crawl_page_count": crawl_page_count,
                 "confirmation_token": create_delete_confirmation_token(
                     request.app.state.action_token_secret,
                     site_id,

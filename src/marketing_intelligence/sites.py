@@ -6,7 +6,7 @@ from sqlalchemy import delete
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from .models import AvailabilityCheck, Site
+from .models import AvailabilityCheck, CrawlPageRecord, CrawlRun, Site
 
 
 def validate_site(name: str, url: str) -> dict[str, str]:
@@ -95,6 +95,11 @@ def delete_site(engine: Engine, site_id: int) -> bool:
         session.exec(
             delete(AvailabilityCheck).where(AvailabilityCheck.site_id == site_id)
         )
+        run_ids = select(CrawlRun.id).where(CrawlRun.site_id == site_id)
+        session.exec(
+            delete(CrawlPageRecord).where(CrawlPageRecord.crawl_run_id.in_(run_ids))
+        )
+        session.exec(delete(CrawlRun).where(CrawlRun.site_id == site_id))
         session.delete(site)
         session.commit()
         return True
