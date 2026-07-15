@@ -144,10 +144,18 @@ input[aria-invalid="true"] { border-color: #b83b3b; }
 .danger-confirmation form { margin-top: 28px; }
 .site-url { overflow-wrap: anywhere; color: #52617a; }
 
+.history-list { margin-top: 18px; border-top: 1px solid #e5eaf2; }
+.history-item { padding: 16px 0; border-bottom: 1px solid #e5eaf2; }
+.history-item summary { display: flex; justify-content: space-between; gap: 16px; cursor: pointer; }
+.history-item summary time { color: #647188; white-space: nowrap; }
+.history-details { padding: 14px 0 0 24px; color: #52617a; }
+.history-details p { margin-bottom: 8px; }
+
 @media (max-width: 640px) {
     .page-shell { width: min(100% - 24px, 1040px); padding-top: 28px; }
     .page-header { align-items: flex-start; flex-direction: column; }
     .site-list li { align-items: flex-start; flex-direction: column; gap: 10px; }
     .site-actions { width: 100%; justify-content: space-between; }
     .danger-zone { align-items: flex-start; flex-direction: column; }
+    .history-item summary { align-items: flex-start; flex-direction: column; gap: 6px; }
 }

@@ -11,7 +11,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from .availability import AvailabilityChecker, AvailabilityResult
+from .availability import AvailabilityChecker, AvailabilityResult, status_title
+from .check_history import (
+    complete_check,
+    count_checks,
+    format_check_count,
+    list_checks,
+    start_check,
+)
 from .confirmation import (
     CHECK_AVAILABILITY_ACTION,
     create_action_token,
@@ -160,6 +167,8 @@ def create_app(
             context={
                 "site": site,
                 "result": result,
+                "history": list_checks(request.app.state.engine, site.id),
+                "status_title": status_title,
                 "action_token": create_action_token(
                     request.app.state.action_token_secret,
                     site.id,
@@ -228,6 +237,9 @@ def create_app(
             name="delete_site.html",
             context={
                 "site": site,
+                "history_count_text": format_check_count(
+                    count_checks(request.app.state.engine, site_id)
+                ),
                 "confirmation_token": create_delete_confirmation_token(
                     request.app.state.action_token_secret,
                     site_id,
@@ -283,7 +295,9 @@ def create_app(
         ):
             return render_check_forbidden(request, site)
 
+        check = start_check(request.app.state.engine, site_id)
         result = await request.app.state.availability_checker.check(site.url)
+        complete_check(request.app.state.engine, check.id, result)
         return render_check_site(request, site, result=result)
 
     return application
