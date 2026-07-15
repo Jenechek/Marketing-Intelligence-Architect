@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -25,6 +25,22 @@ class AvailabilityStatus(StrEnum):
     DEFERRED = "deferred"
     REDIRECT = "redirect"
     NETWORK_ERROR = "network_error"
+
+
+STATUS_TITLES = {
+    AvailabilityStatus.AVAILABLE.value: "Доступно",
+    AvailabilityStatus.FORBIDDEN.value: "Запрещено правилами robots.txt",
+    AvailabilityStatus.DEFERRED.value: "Проверка отложена",
+    AvailabilityStatus.REDIRECT.value: "Перенаправление",
+    AvailabilityStatus.NETWORK_ERROR.value: "Сетевая ошибка",
+    "running": "Проверка не завершена",
+}
+
+
+def status_title(status: str) -> str:
+    """Вернуть понятное название сохранённого статуса."""
+
+    return STATUS_TITLES.get(status, "Неизвестный результат")
 
 
 @dataclass(frozen=True)
@@ -61,6 +77,7 @@ class AvailabilityChecker:
 
     async def _check_once(self, start_url: str) -> AvailabilityResult:
         robots_url = _robots_url(start_url)
+        robots_status: int | None = None
         client_options: dict[str, Any] = {
             "headers": {"User-Agent": USER_AGENT},
             "timeout": REQUEST_TIMEOUT_SECONDS,
@@ -72,22 +89,34 @@ class AvailabilityChecker:
         try:
             async with self._client_factory(**client_options) as client:
                 robots_result = await self._check_robots(client, robots_url, start_url)
-                if robots_result is not None:
+                if isinstance(robots_result, AvailabilityResult):
                     return robots_result
 
+                robots_status = robots_result
                 await self._delay(REQUEST_DELAY_SECONDS)
-                return await self._check_start_page(client, start_url)
+                page_result = await self._check_start_page(client, start_url)
+                return replace(page_result, robots_status=robots_result)
         except httpx.TimeoutException:
-            return _network_error("Сервер не ответил за 15 секунд. Проверку можно повторить позже.")
+            return replace(
+                _network_error(
+                    "Сервер не ответил за 15 секунд. Проверку можно повторить позже."
+                ),
+                robots_status=robots_status,
+            )
         except httpx.RequestError:
-            return _network_error("Не удалось подключиться к сайту. Проверку можно повторить позже.")
+            return replace(
+                _network_error(
+                    "Не удалось подключиться к сайту. Проверку можно повторить позже."
+                ),
+                robots_status=robots_status,
+            )
 
     async def _check_robots(
         self,
         client: httpx.AsyncClient,
         robots_url: str,
         start_url: str,
-    ) -> AvailabilityResult | None:
+    ) -> AvailabilityResult | int:
         response = await client.get(robots_url)
         status = response.status_code
 
@@ -99,13 +128,13 @@ class AvailabilityChecker:
                 robots_status=status,
             )
         if status == 404:
-            return None
+            return status
         if 200 <= status < 300:
             parser = RobotFileParser()
             parser.set_url(robots_url)
             parser.parse(response.text.splitlines())
             if parser.can_fetch(USER_AGENT, start_url):
-                return None
+                return status
             return AvailabilityResult(
                 AvailabilityStatus.FORBIDDEN,
                 "Запрещено правилами robots.txt",

@@ -2,10 +2,11 @@
 
 from urllib.parse import urlsplit
 
+from sqlalchemy import delete
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from .models import Site
+from .models import AvailabilityCheck, Site
 
 
 def validate_site(name: str, url: str) -> dict[str, str]:
@@ -84,13 +85,16 @@ def update_site(engine: Engine, site_id: int, name: str, url: str) -> Site | Non
 
 
 def delete_site(engine: Engine, site_id: int) -> bool:
-    """Окончательно удалить выбранный сайт одной транзакцией."""
+    """Окончательно удалить выбранный сайт и его историю одной транзакцией."""
 
     with Session(engine) as session:
         site = session.get(Site, site_id)
         if site is None:
             return False
 
+        session.exec(
+            delete(AvailabilityCheck).where(AvailabilityCheck.site_id == site_id)
+        )
         session.delete(site)
         session.commit()
         return True

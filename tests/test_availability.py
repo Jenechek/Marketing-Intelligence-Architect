@@ -1,5 +1,6 @@
 import asyncio
-import hashlib
+from datetime import datetime, timedelta, timezone
+from functools import partial
 from pathlib import Path
 import re
 
@@ -7,7 +8,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import httpx
 import pytest
+from sqlmodel import Session, select
 
+import marketing_intelligence.main as main_module
 from marketing_intelligence.availability import (
     AvailabilityChecker,
     AvailabilityStatus,
@@ -16,7 +19,9 @@ from marketing_intelligence.availability import (
     USER_AGENT,
 )
 from marketing_intelligence.config import Settings
+from marketing_intelligence.check_history import to_local_datetime
 from marketing_intelligence.main import create_app
+from marketing_intelligence.models import AvailabilityCheck
 
 
 class TrackingStream(httpx.AsyncByteStream):
@@ -87,6 +92,12 @@ def run_check(client: TestClient, site_id: int = 1) -> httpx.Response:
     )
 
 
+def saved_checks(app: FastAPI) -> list[AvailabilityCheck]:
+    with Session(app.state.engine) as session:
+        statement = select(AvailabilityCheck).order_by(AvailabilityCheck.id)
+        return list(session.exec(statement).all())
+
+
 def test_check_screen_has_site_and_one_primary_action(tmp_path: Path) -> None:
     app, _, requests = build_test_app(
         tmp_path,
@@ -96,6 +107,7 @@ def test_check_screen_has_site_and_one_primary_action(tmp_path: Path) -> None:
         add_site(client)
         list_response = client.get("/")
         response = client.get("/sites/1/check")
+        checks = saved_checks(app)
 
     assert response.status_code == 200
     assert "Проверяемый сайт" in response.text
@@ -104,6 +116,7 @@ def test_check_screen_has_site_and_one_primary_action(tmp_path: Path) -> None:
     assert 'method="post"' in response.text
     assert "Проверить доступность" in list_response.text
     assert requests == []
+    assert checks == []
 
 
 @pytest.mark.parametrize(
@@ -128,11 +141,14 @@ def test_robots_allow_and_forbid(
     with TestClient(app) as client:
         add_site(client)
         response = run_check(client)
+        checks = saved_checks(app)
 
     assert response.status_code == 200
     assert f'class="notice {"success" if page_requested else "error"}' in response.text
     assert ("Доступно" if page_requested else "Запрещено правилами robots.txt") in response.text
     assert [request.url.path for request in requests].count("/start") == int(page_requested)
+    assert checks[0].robots_status == 200
+    assert checks[0].page_status == (204 if page_requested else None)
 
 
 def test_missing_robots_allows_one_streamed_page_request(tmp_path: Path) -> None:
@@ -270,10 +286,12 @@ def test_invalid_missing_other_site_and_other_action_tokens_do_not_use_network(t
             client.post("/sites/2/check", data={"action_token": site_one_token}),
             client.post("/sites/1/check", data={"action_token": delete_token}),
         ]
+        checks = saved_checks(app)
 
     assert all(response.status_code == 403 for response in responses)
     assert all("Сетевые запросы не выполнялись" in response.text for response in responses)
     assert requests == []
+    assert checks == []
 
 
 def test_unknown_site_check_keeps_controlled_404_without_network(tmp_path: Path) -> None:
@@ -282,30 +300,150 @@ def test_unknown_site_check_keeps_controlled_404_without_network(tmp_path: Path)
         lambda request: httpx.Response(204),
     )
     with TestClient(app) as client:
+        add_site(client)
         get_response = client.get("/sites/999/check")
         post_response = client.post("/sites/999/check")
+        checks = saved_checks(app)
+        saved_response = client.get("/")
 
     assert get_response.status_code == 404
     assert post_response.status_code == 404
     assert "Сайт не найден" in get_response.text
     assert requests == []
+    assert checks == []
+    assert "Проверяемый сайт" in saved_response.text
 
 
-def test_check_does_not_change_sqlite(tmp_path: Path) -> None:
+def test_successful_check_is_saved_with_times_status_message_and_http_codes(
+    tmp_path: Path,
+) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(404 if request.url.path == "/robots.txt" else 204)
 
-    app, database_path, _ = build_test_app(tmp_path, handler)
+    app, _, _ = build_test_app(tmp_path, handler)
     with TestClient(app) as client:
         add_site(client)
-        before = hashlib.sha256(database_path.read_bytes()).digest()
         response = run_check(client)
-        after = hashlib.sha256(database_path.read_bytes()).digest()
-        saved_response = client.get("/")
+        checks = saved_checks(app)
 
     assert response.status_code == 200
-    assert before == after
-    assert "Проверяемый сайт" in saved_response.text
+    assert len(checks) == 1
+    assert checks[0].site_id == 1
+    assert checks[0].started_at is not None
+    assert checks[0].completed_at is not None
+    assert checks[0].completed_at >= checks[0].started_at
+    assert checks[0].status == AvailabilityStatus.AVAILABLE.value
+    assert checks[0].message
+    assert checks[0].robots_status == 404
+    assert checks[0].page_status == 204
+    assert "История проверок" in response.text
+    assert "Ответ стартовой страницы: HTTP 204" in response.text
+
+
+def test_network_error_is_saved_without_invented_http_codes(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("test failure", request=request)
+
+    app, _, _ = build_test_app(tmp_path, handler)
+    with TestClient(app) as client:
+        add_site(client)
+        response = run_check(client)
+        checks = saved_checks(app)
+
+    assert response.status_code == 200
+    assert len(checks) == 1
+    assert checks[0].status == AvailabilityStatus.NETWORK_ERROR.value
+    assert "Не удалось подключиться" in checks[0].message
+    assert checks[0].robots_status is None
+    assert checks[0].page_status is None
+    assert checks[0].completed_at is not None
+
+
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout])
+def test_page_error_keeps_successful_robots_http_code(
+    tmp_path: Path,
+    error_type: type[httpx.RequestError],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, content=b"User-agent: *\nAllow: /")
+        raise error_type("page failure", request=request)
+
+    app, _, requests = build_test_app(tmp_path, handler)
+    with TestClient(app) as client:
+        add_site(client)
+        response = run_check(client)
+        checks = saved_checks(app)
+
+    assert response.status_code == 200
+    assert "Сетевая ошибка" in response.text
+    assert [request.url.path for request in requests] == ["/robots.txt", "/start"]
+    assert len(checks) == 1
+    assert checks[0].status == AvailabilityStatus.NETWORK_ERROR.value
+    assert checks[0].robots_status == 200
+    assert checks[0].page_status is None
+
+
+def test_history_formats_stored_utc_in_local_timezone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moscow_timezone = timezone(timedelta(hours=3), name="MSK")
+    monkeypatch.setattr(
+        main_module,
+        "to_local_datetime",
+        partial(to_local_datetime, target_timezone=moscow_timezone),
+    )
+    app, _, _ = build_test_app(tmp_path, lambda request: httpx.Response(500))
+    stored_time = datetime(2026, 7, 15, 12, 30)
+
+    with TestClient(app) as client:
+        add_site(client)
+        with Session(app.state.engine) as session:
+            session.add(
+                AvailabilityCheck(
+                    site_id=1,
+                    started_at=stored_time,
+                    completed_at=stored_time,
+                    status=AvailabilityStatus.AVAILABLE.value,
+                    message="Проверка времени",
+                )
+            )
+            session.commit()
+        response = client.get("/sites/1/check")
+
+    assert response.status_code == 200
+    assert "15.07.2026 15:30:00 MSK (UTC+0300)" in response.text
+    assert 'datetime="2026-07-15T15:30:00+03:00"' in response.text
+
+
+def test_history_survives_restart_and_is_newest_first(tmp_path: Path) -> None:
+    def first_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403)
+
+    app, _, _ = build_test_app(tmp_path, first_handler)
+    with TestClient(app) as client:
+        add_site(client)
+        first_response = run_check(client)
+
+    assert "Проверка отложена" in first_response.text
+
+    def second_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404 if request.url.path == "/robots.txt" else 200)
+
+    restarted_app, _, _ = build_test_app(tmp_path, second_handler)
+    with TestClient(restarted_app) as client:
+        second_response = run_check(client)
+        history_response = client.get("/sites/1/check")
+        checks = saved_checks(restarted_app)
+
+    assert second_response.status_code == 200
+    assert history_response.status_code == 200
+    assert len(checks) == 2
+    assert history_response.text.count('class="history-item"') == 2
+    assert history_response.text.index("Доступно") < history_response.text.index(
+        "Проверка отложена"
+    )
 
 
 def test_checker_serializes_concurrent_checks() -> None:

@@ -33,13 +33,47 @@
             </div>
             {% endif %}
 
-            <p>Проверка не обходит ссылки, не выполняет JavaScript, не отправляет формы и не сохраняет результат.</p>
+            <p>Проверка не обходит ссылки, не выполняет JavaScript и не отправляет формы. Результат сохраняется в локальной истории.</p>
 
             <form action="/sites/{{ site.id }}/check" method="post">
                 <input type="hidden" name="action_token" value="{{ action_token }}">
                 <button class="primary-action" type="submit">Запустить проверку</button>
                 <a class="secondary-action" href="/">Вернуться к списку</a>
             </form>
+        </section>
+
+        <section class="content-card" aria-labelledby="history-title">
+            <div class="section-heading">
+                <div>
+                    <h2 id="history-title">История проверок</h2>
+                    <p>Новые результаты показаны первыми. Раскройте запись, чтобы увидеть подробности.</p>
+                </div>
+                <span class="count" aria-label="Записей в истории">{{ history|length }}</span>
+            </div>
+
+            {% if history %}
+            <div class="history-list">
+                {% for check in history %}
+                {% set started_local = to_local_datetime(check.started_at) %}
+                {% set completed_local = to_local_datetime(check.completed_at) if check.completed_at else none %}
+                <details class="history-item">
+                    <summary>
+                        <strong>{{ status_title(check.status) }}</strong>
+                        <time datetime="{{ started_local.isoformat() }}">{{ started_local.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)') }}</time>
+                    </summary>
+                    <div class="history-details">
+                        <p>{{ check.message }}</p>
+                        <p>Начало: {{ started_local.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)') }}.</p>
+                        <p>Завершение: {% if completed_local %}{{ completed_local.strftime('%d.%m.%Y %H:%M:%S %Z (UTC%z)') }}{% else %}не зафиксировано{% endif %}.</p>
+                        {% if check.robots_status is not none %}<p>Ответ robots.txt: HTTP {{ check.robots_status }}.</p>{% endif %}
+                        {% if check.page_status is not none %}<p>Ответ стартовой страницы: HTTP {{ check.page_status }}.</p>{% endif %}
+                    </div>
+                </details>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="empty-state">Проверок пока не было.</p>
+            {% endif %}
         </section>
     </main>
 </body>
