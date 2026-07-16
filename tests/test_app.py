@@ -10,7 +10,12 @@ from marketing_intelligence.config import Settings
 from marketing_intelligence.crawl_history import start_crawl_run
 from marketing_intelligence.crawler import CrawlSettings
 from marketing_intelligence.main import create_app
-from marketing_intelligence.models import AvailabilityCheck, CrawlPageRecord, CrawlRun
+from marketing_intelligence.models import (
+    AvailabilityCheck,
+    CrawlPageRecord,
+    CrawlPageSnapshot,
+    CrawlRun,
+)
 
 
 def build_test_app(tmp_path: Path) -> tuple[FastAPI, Path]:
@@ -87,8 +92,8 @@ def add_saved_crawl(app: FastAPI, site_id: int, page_count: int) -> None:
         )
         session.add(run)
         session.flush()
-        session.add_all(
-            CrawlPageRecord(
+        for number in range(1, page_count + 1):
+            record = CrawlPageRecord(
                 crawl_run_id=run.id,
                 sequence_number=number,
                 url=f"https://example.com/{site_id}/{number}",
@@ -97,8 +102,21 @@ def add_saved_crawl(app: FastAPI, site_id: int, page_count: int) -> None:
                 message="Страница обработана",
                 http_status=200,
             )
-            for number in range(1, page_count + 1)
-        )
+            session.add(record)
+            session.flush()
+            session.add(
+                CrawlPageSnapshot(
+                    crawl_page_record_id=record.id,
+                    checked_at=datetime.now(UTC),
+                    title=None,
+                    description="",
+                    h1="Тест",
+                    normalized_text="тест",
+                    content_hash="9f86d081884c7d659a2feaa0c55ad015"
+                    "a3bf4f1b2b0b822cd15d6c15b0f00a08",
+                    internal_links_json="[]",
+                )
+            )
         session.commit()
 
 
@@ -109,6 +127,21 @@ def saved_crawl_data(app: FastAPI) -> tuple[list[int], list[int]]:
             session.exec(select(CrawlPageRecord).order_by(CrawlPageRecord.id)).all()
         )
         return [run.site_id for run in runs], [page.crawl_run_id for page in pages]
+
+
+def saved_snapshot_site_ids(app: FastAPI) -> list[int]:
+    with Session(app.state.engine) as session:
+        return list(
+            session.exec(
+                select(CrawlRun.site_id)
+                .join(CrawlPageRecord, CrawlPageRecord.crawl_run_id == CrawlRun.id)
+                .join(
+                    CrawlPageSnapshot,
+                    CrawlPageSnapshot.crawl_page_record_id == CrawlPageRecord.id,
+                )
+                .order_by(CrawlPageSnapshot.crawl_page_record_id)
+            )
+        )
 
 
 def test_site_list_starts_empty_and_initializes_sqlite(tmp_path: Path) -> None:
@@ -297,6 +330,7 @@ def test_delete_confirmation_shows_site_and_warning_without_deleting(tmp_path: P
     assert "2 записи истории проверок" in response.text
     assert "запусков обхода — 2" in response.text
     assert "записей страниц — 3" in response.text
+    assert "страниц с сохранённым содержимым — 3" in response.text
     assert 'method="post"' in response.text
     assert 'type="hidden" name="confirmation_token"' in response.text
     first_token = re.search(
@@ -351,6 +385,7 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
         success_response = client.get(response.headers["location"])
         remaining_history = saved_check_messages(app)
         remaining_crawl_data = saved_crawl_data(app)
+        remaining_snapshot_sites = saved_snapshot_site_ids(app)
 
     assert second_response.status_code == 303
     assert response.status_code == 303
@@ -360,6 +395,7 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
     assert "Второй сайт" in success_response.text
     assert remaining_history == ["История второго сайта"]
     assert remaining_crawl_data == ([2], [2])
+    assert remaining_snapshot_sites == [2]
 
 
 def test_deleted_site_stays_absent_after_restart(tmp_path: Path) -> None:
