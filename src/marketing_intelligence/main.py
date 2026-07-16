@@ -42,6 +42,7 @@ from .crawl_history import (
     recover_interrupted_runs,
     start_crawl_run,
 )
+from .crawl_settings import default_crawl_form, parse_crawl_settings
 from .crawler import CrawlSettings, Crawler
 from .logging_config import configure_logging
 from .models import Site
@@ -234,19 +235,28 @@ def create_app(
             status_code=status_code,
         )
 
-    def render_crawl_screen(request: Request, site: Site) -> HTMLResponse:
+    def render_crawl_screen(
+        request: Request,
+        site: Site,
+        *,
+        form: dict[str, str] | None = None,
+        errors: dict[str, str] | None = None,
+        status_code: int = 200,
+    ) -> HTMLResponse:
         return templates.TemplateResponse(
             request=request,
             name="crawl_site.html",
             context={
                 "site": site,
-                "settings": CrawlSettings(),
+                "form": form or default_crawl_form(),
+                "errors": errors or {},
                 "action_token": create_action_token(
                     request.app.state.action_token_secret,
                     site.id,
                     START_CRAWL_ACTION,
                 ),
             },
+            status_code=status_code,
         )
 
     def render_crawl_forbidden(request: Request, site: Site) -> HTMLResponse:
@@ -436,7 +446,21 @@ def create_app(
         ):
             return render_crawl_forbidden(request, site)
 
-        settings = CrawlSettings()
+        default_form = default_crawl_form()
+        form = {
+            field: raw_form.get(field, [default_value])[0]
+            for field, default_value in default_form.items()
+        }
+        settings, errors = parse_crawl_settings(form)
+        if errors:
+            return render_crawl_screen(
+                request,
+                site,
+                form=form,
+                errors=errors,
+                status_code=422,
+            )
+        assert settings is not None
         try:
             run = start_crawl_run(request.app.state.engine, site_id, settings)
         except ActiveCrawlRunError as error:

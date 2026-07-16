@@ -23,17 +23,55 @@
                     <p>Обход продолжится в фоне. В это время можно пользоваться другими экранами.</p>
                 </div>
             </div>
-            <dl class="summary-list">
-                <div><dt>Страниц не более</dt><dd>{{ settings.max_pages }}</dd></div>
-                <div><dt>Глубина</dt><dd>{{ settings.max_depth }}</dd></div>
-                <div><dt>Задержка</dt><dd>{{ settings.delay|int }} с</dd></div>
-                <div><dt>Ожидание ответа</dt><dd>{{ settings.timeout|int }} с</dd></div>
-                <div><dt>Одновременных запросов</dt><dd>1</dd></div>
-            </dl>
-            <form action="/sites/{{ site.id }}/crawl" method="post">
+            {% if errors %}
+            <div class="notice error" role="alert">Обход не запущен. Проверьте отмеченные поля.</div>
+            {% endif %}
+            <form action="/sites/{{ site.id }}/crawl" method="post" novalidate>
                 <input type="hidden" name="action_token" value="{{ action_token }}">
-                <button class="primary-action" type="submit">Запустить полный обход</button>
-                <a class="secondary-action" href="/">Вернуться к сайтам</a>
+                <details class="advanced-settings"{% if errors %} open{% endif %}>
+                    <summary>Расширенные настройки</summary>
+                    <div class="advanced-settings-fields">
+                        <div class="field">
+                            <label for="max_pages">Максимум страниц</label>
+                            <input id="max_pages" name="max_pages" type="number" min="1" max="200" step="1" value="{{ form.max_pages }}" required
+                                   {% if errors.max_pages %}aria-invalid="true" aria-describedby="max-pages-help max-pages-error"{% else %}aria-describedby="max-pages-help"{% endif %}>
+                            <p class="field-help" id="max-pages-help">Целое число от 1 до 200.</p>
+                            {% if errors.max_pages %}<p class="field-error" id="max-pages-error">{{ errors.max_pages }}</p>{% endif %}
+                        </div>
+                        <div class="field">
+                            <label for="max_depth">Максимальная глубина</label>
+                            <input id="max_depth" name="max_depth" type="number" min="0" max="10" step="1" value="{{ form.max_depth }}" required
+                                   {% if errors.max_depth %}aria-invalid="true" aria-describedby="max-depth-help max-depth-error"{% else %}aria-describedby="max-depth-help"{% endif %}>
+                            <p class="field-help" id="max-depth-help">0 — обработать только стартовую страницу; максимум 10.</p>
+                            {% if errors.max_depth %}<p class="field-error" id="max-depth-error">{{ errors.max_depth }}</p>{% endif %}
+                        </div>
+                        <div class="field">
+                            <label for="delay">Задержка между запросами, с</label>
+                            <input id="delay" name="delay" type="text" inputmode="decimal" value="{{ form.delay }}" required
+                                   {% if errors.delay %}aria-invalid="true" aria-describedby="delay-help delay-error"{% else %}aria-describedby="delay-help"{% endif %}>
+                            <p class="field-help" id="delay-help">От 0,5 до 60. Можно использовать запятую или точку.</p>
+                            {% if errors.delay %}<p class="field-error" id="delay-error">{{ errors.delay }}</p>{% endif %}
+                        </div>
+                        <div class="field">
+                            <label for="timeout">Ожидание ответа, с</label>
+                            <input id="timeout" name="timeout" type="text" inputmode="decimal" value="{{ form.timeout }}" required
+                                   {% if errors.timeout %}aria-invalid="true" aria-describedby="timeout-help timeout-error"{% else %}aria-describedby="timeout-help"{% endif %}>
+                            <p class="field-help" id="timeout-help">От 1 до 120. Можно использовать запятую или точку.</p>
+                            {% if errors.timeout %}<p class="field-error" id="timeout-error">{{ errors.timeout }}</p>{% endif %}
+                        </div>
+                        <div class="field">
+                            <label for="user_agent">User-Agent</label>
+                            <input id="user_agent" name="user_agent" type="text" maxlength="200" value="{{ form.user_agent }}" required
+                                   {% if errors.user_agent %}aria-invalid="true" aria-describedby="user-agent-help user-agent-error"{% else %}aria-describedby="user-agent-help"{% endif %}>
+                            <p class="field-help" id="user-agent-help">От 1 до 200 символов. Одновременных запросов всегда 1.</p>
+                            {% if errors.user_agent %}<p class="field-error" id="user-agent-error">{{ errors.user_agent }}</p>{% endif %}
+                        </div>
+                    </div>
+                </details>
+                <div class="form-actions">
+                    <button class="primary-action" type="submit">Запустить полный обход</button>
+                    <a class="secondary-action" href="/">Вернуться к сайтам</a>
+                </div>
             </form>
         </section>
     </main>

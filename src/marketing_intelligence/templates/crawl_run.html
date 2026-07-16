@@ -52,6 +52,17 @@
                 {% if run.limited %}Достигнуто ограничение обхода.{% else %}Ограничение обхода не достигнуто.{% endif %}
             </div>
             {% endif %}
+            <details class="technical-settings">
+                <summary>Фактически использованные настройки</summary>
+                <dl class="summary-list">
+                    <div><dt>Максимум страниц</dt><dd>{{ run.max_pages }}</dd></div>
+                    <div><dt>Максимальная глубина</dt><dd>{{ run.max_depth }}</dd></div>
+                    <div><dt>Задержка</dt><dd>{{ run.delay }} с</dd></div>
+                    <div><dt>Ожидание ответа</dt><dd>{{ run.timeout }} с</dd></div>
+                    <div><dt>User-Agent</dt><dd class="technical-value">{{ run.user_agent }}</dd></div>
+                    <div><dt>Одновременных запросов</dt><dd>1</dd></div>
+                </dl>
+            </details>
             <a class="secondary-action" href="/">Вернуться к сайтам</a>
         </section>
     </main>
