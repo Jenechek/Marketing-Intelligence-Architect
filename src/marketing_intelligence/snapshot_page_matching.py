@@ -35,6 +35,15 @@ class SnapshotPageMatchResult:
     matched: tuple[MatchedSnapshotPages, ...]
 
 
+@dataclass(frozen=True)
+class CompletedSnapshotPair:
+    """Результат сопоставления выбранного завершённого запуска с предыдущим."""
+
+    current_run_id: int
+    previous_run_id: int | None
+    match_result: SnapshotPageMatchResult
+
+
 class DuplicateSnapshotPageUrlError(ValueError):
     """В одной коллекции снимка повторяется URL страницы."""
 
