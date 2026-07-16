@@ -341,9 +341,12 @@ def create_app(
         active_run = get_running_crawl_run(request.app.state.engine, site_id)
         if active_run is not None:
             return render_delete_running(request, site, active_run.id)
-        crawl_run_count, crawl_page_count, crawl_snapshot_count = count_crawl_data(
-            request.app.state.engine, site_id
-        )
+        (
+            crawl_run_count,
+            crawl_page_count,
+            crawl_snapshot_count,
+            crawl_price_count,
+        ) = count_crawl_data(request.app.state.engine, site_id)
         return templates.TemplateResponse(
             request=request,
             name="delete_site.html",
@@ -355,6 +358,7 @@ def create_app(
                 "crawl_run_count": crawl_run_count,
                 "crawl_page_count": crawl_page_count,
                 "crawl_snapshot_count": crawl_snapshot_count,
+                "crawl_price_count": crawl_price_count,
                 "confirmation_token": create_delete_confirmation_token(
                     request.app.state.action_token_secret,
                     site_id,

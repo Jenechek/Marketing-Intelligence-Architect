@@ -15,7 +15,14 @@ from .crawler import (
     Crawler,
     PageOutcome,
 )
-from .models import CrawlPageRecord, CrawlPageSnapshot, CrawlRun, Site
+from .models import (
+    CrawlPagePriceRecord,
+    CrawlPageRecord,
+    CrawlPageSnapshot,
+    CrawlRun,
+    Site,
+)
+from .price_persistence import encode_decimal_text
 
 
 RUNNING_STATUS = "running"
@@ -234,8 +241,8 @@ def recover_interrupted_runs(engine: Engine) -> int:
         return result.rowcount or 0
 
 
-def count_crawl_data(engine: Engine, site_id: int) -> tuple[int, int, int]:
-    """Вернуть количества запусков, страниц и снимков выбранного сайта."""
+def count_crawl_data(engine: Engine, site_id: int) -> tuple[int, int, int, int]:
+    """Вернуть количества запусков, страниц, снимков и цен выбранного сайта."""
 
     with Session(engine) as session:
         runs = session.exec(
@@ -259,7 +266,22 @@ def count_crawl_data(engine: Engine, site_id: int) -> tuple[int, int, int]:
             .join(CrawlRun, CrawlPageRecord.crawl_run_id == CrawlRun.id)
             .where(CrawlRun.site_id == site_id)
         ).one()
-        return runs, pages, snapshots
+        prices = session.exec(
+            select(func.count())
+            .select_from(CrawlPagePriceRecord)
+            .join(
+                CrawlPageSnapshot,
+                CrawlPagePriceRecord.crawl_page_snapshot_id
+                == CrawlPageSnapshot.crawl_page_record_id,
+            )
+            .join(
+                CrawlPageRecord,
+                CrawlPageSnapshot.crawl_page_record_id == CrawlPageRecord.id,
+            )
+            .join(CrawlRun, CrawlPageRecord.crawl_run_id == CrawlRun.id)
+            .where(CrawlRun.site_id == site_id)
+        ).one()
+        return runs, pages, snapshots, prices
 
 
 def _complete_crawl_run(
@@ -308,20 +330,30 @@ def _complete_crawl_run(
                     if record.id is None:
                         raise LookupError("Запись страницы не получила идентификатор.")
                     data = page.page_data
-                    session.add(
-                        CrawlPageSnapshot(
-                            crawl_page_record_id=record.id,
-                            checked_at=data.checked_at,
-                            title=data.title,
-                            description=data.description,
-                            h1=data.h1,
-                            normalized_text=data.normalized_text,
-                            content_hash=data.content_hash,
-                            internal_links_json=_encode_internal_links(
-                                data.internal_links
-                            ),
-                        )
+                    snapshot = CrawlPageSnapshot(
+                        crawl_page_record_id=record.id,
+                        checked_at=data.checked_at,
+                        title=data.title,
+                        description=data.description,
+                        h1=data.h1,
+                        normalized_text=data.normalized_text,
+                        content_hash=data.content_hash,
+                        internal_links_json=_encode_internal_links(
+                            data.internal_links
+                        ),
                     )
+                    session.add(snapshot)
+                    for price_number, price in enumerate(data.prices, start=1):
+                        session.add(
+                            CrawlPagePriceRecord(
+                                crawl_page_snapshot_id=record.id,
+                                sequence_number=price_number,
+                                amount_text=encode_decimal_text(price.amount),
+                                currency=price.currency,
+                                kind=price.kind,
+                                source=price.source,
+                            )
+                        )
         session.commit()
         return run
 

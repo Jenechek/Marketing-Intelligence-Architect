@@ -12,6 +12,7 @@ from marketing_intelligence.crawler import CrawlSettings
 from marketing_intelligence.main import create_app
 from marketing_intelligence.models import (
     AvailabilityCheck,
+    CrawlPagePriceRecord,
     CrawlPageRecord,
     CrawlPageSnapshot,
     CrawlRun,
@@ -117,6 +118,16 @@ def add_saved_crawl(app: FastAPI, site_id: int, page_count: int) -> None:
                     internal_links_json="[]",
                 )
             )
+            session.add(
+                CrawlPagePriceRecord(
+                    crawl_page_snapshot_id=record.id,
+                    sequence_number=1,
+                    amount_text=str(number),
+                    currency=None,
+                    kind="price",
+                    source="test",
+                )
+            )
         session.commit()
 
 
@@ -140,6 +151,26 @@ def saved_snapshot_site_ids(app: FastAPI) -> list[int]:
                     CrawlPageSnapshot.crawl_page_record_id == CrawlPageRecord.id,
                 )
                 .order_by(CrawlPageSnapshot.crawl_page_record_id)
+            )
+        )
+
+
+def saved_price_site_ids(app: FastAPI) -> list[int]:
+    with Session(app.state.engine) as session:
+        return list(
+            session.exec(
+                select(CrawlRun.site_id)
+                .join(CrawlPageRecord, CrawlPageRecord.crawl_run_id == CrawlRun.id)
+                .join(
+                    CrawlPageSnapshot,
+                    CrawlPageSnapshot.crawl_page_record_id == CrawlPageRecord.id,
+                )
+                .join(
+                    CrawlPagePriceRecord,
+                    CrawlPagePriceRecord.crawl_page_snapshot_id
+                    == CrawlPageSnapshot.crawl_page_record_id,
+                )
+                .order_by(CrawlPagePriceRecord.id)
             )
         )
 
@@ -331,6 +362,7 @@ def test_delete_confirmation_shows_site_and_warning_without_deleting(tmp_path: P
     assert "запусков обхода — 2" in response.text
     assert "записей страниц — 3" in response.text
     assert "страниц с сохранённым содержимым — 3" in response.text
+    assert "сохранённых цен — 3" in response.text
     assert 'method="post"' in response.text
     assert 'type="hidden" name="confirmation_token"' in response.text
     first_token = re.search(
@@ -386,6 +418,7 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
         remaining_history = saved_check_messages(app)
         remaining_crawl_data = saved_crawl_data(app)
         remaining_snapshot_sites = saved_snapshot_site_ids(app)
+        remaining_price_sites = saved_price_site_ids(app)
 
     assert second_response.status_code == 303
     assert response.status_code == 303
@@ -396,6 +429,7 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
     assert remaining_history == ["История второго сайта"]
     assert remaining_crawl_data == ([2], [2])
     assert remaining_snapshot_sites == [2]
+    assert remaining_price_sites == [2]
 
 
 def test_deleted_site_stays_absent_after_restart(tmp_path: Path) -> None:

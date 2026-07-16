@@ -1,11 +1,13 @@
 import asyncio
 from datetime import UTC, datetime
+from decimal import Decimal
 import hashlib
 import json
 from pathlib import Path
 
 import pytest
 from sqlalchemy import inspect
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from marketing_intelligence.crawl_history import (
@@ -23,12 +25,17 @@ from marketing_intelligence.crawler import (
 )
 from marketing_intelligence.database import build_engine, initialize_database
 from marketing_intelligence.models import (
+    CrawlPagePriceRecord,
     CrawlPageRecord,
     CrawlPageSnapshot,
     CrawlRun,
     Site,
 )
-from marketing_intelligence.page_content import PageData
+from marketing_intelligence.page_content import PageData, PagePrice
+from marketing_intelligence.price_persistence import (
+    decode_decimal_text,
+    encode_decimal_text,
+)
 
 
 def database_url(tmp_path: Path) -> str:
@@ -94,6 +101,7 @@ def page_data(
     h1: str | None = "H1",
     links: tuple[str, ...] = (),
     checked_at: datetime = datetime(2026, 7, 16, 9, 30, tzinfo=UTC),
+    prices: tuple[PagePrice, ...] = (),
 ) -> PageData:
     return PageData(
         checked_at=checked_at,
@@ -103,6 +111,7 @@ def page_data(
         normalized_text=text,
         content_hash=hashlib.sha256(text.encode("utf-8")).hexdigest(),
         internal_links=links,
+        prices=prices,
     )
 
 
@@ -316,6 +325,7 @@ def test_completed_snapshot_preserves_missing_empty_utc_hash_and_ordered_unicode
     with Session(restarted) as session:
         record = session.exec(select(CrawlPageRecord)).one()
         snapshot = session.exec(select(CrawlPageSnapshot)).one()
+        stored_prices = session.exec(select(CrawlPagePriceRecord)).all()
 
     assert snapshot.crawl_page_record_id == record.id
     assert (snapshot.title, snapshot.description, snapshot.h1) == (
@@ -333,7 +343,125 @@ def test_completed_snapshot_preserves_missing_empty_utc_hash_and_ordered_unicode
     assert tuple(json.loads(snapshot.internal_links_json)) == links
     assert "url" not in CrawlPageSnapshot.__table__.columns
     assert "http_status" not in CrawlPageSnapshot.__table__.columns
+    assert stored_prices == []
     restarted.dispose()
+
+
+def test_completed_saves_ordered_prices_with_exact_canonical_amounts(
+    tmp_path: Path,
+) -> None:
+    engine = initialized_engine(tmp_path)
+    prices = (
+        PagePrice(Decimal("10.00"), "RUB", "price", "json-ld"),
+        PagePrice(Decimal("0.0100"), None, "low", "microdata"),
+        PagePrice(Decimal("-0.000"), "USD", "high", "json-ld"),
+    )
+    page = CrawlPageResult(
+        "https://example.com/",
+        0,
+        PageOutcome.HTML,
+        "HTML обработан",
+        200,
+        page_data=page_data(prices=prices),
+    )
+
+    asyncio.run(
+        run_crawl(
+            engine,
+            1,
+            page.url,
+            crawler=ResultCrawler(
+                engine,
+                result_with(
+                    pages=(page,),
+                    counters=CrawlCounters(processed=1, requested=1, successful=1),
+                ),
+            ),
+        )
+    )
+    engine.dispose()
+
+    restarted = build_engine(database_url(tmp_path))
+    initialize_database(restarted)
+    with Session(restarted) as session:
+        stored = list(
+            session.exec(
+                select(CrawlPagePriceRecord).order_by(
+                    CrawlPagePriceRecord.sequence_number
+                )
+            )
+        )
+        snapshot = session.exec(select(CrawlPageSnapshot)).one()
+
+        assert [price.crawl_page_snapshot_id for price in stored] == [
+            snapshot.crawl_page_record_id,
+        ] * 3
+        assert [price.sequence_number for price in stored] == [1, 2, 3]
+        assert [price.amount_text for price in stored] == ["10", "0.01", "0"]
+        assert [price.amount for price in stored] == [
+            Decimal("10"),
+            Decimal("0.01"),
+            Decimal("0"),
+        ]
+        assert [price.currency for price in stored] == ["RUB", None, "USD"]
+        assert [price.kind for price in stored] == ["price", "low", "high"]
+        assert [price.source for price in stored] == [
+            "json-ld",
+            "microdata",
+            "json-ld",
+        ]
+        foreign_key = next(
+            iter(
+                CrawlPagePriceRecord.__table__.c.crawl_page_snapshot_id.foreign_keys
+            )
+        )
+        assert foreign_key.target_fullname == (
+            "crawlpagesnapshot.crawl_page_record_id"
+        )
+
+        session.add(
+            CrawlPagePriceRecord(
+                crawl_page_snapshot_id=snapshot.crawl_page_record_id,
+                sequence_number=1,
+                amount_text="1",
+                currency=None,
+                kind="price",
+                source="test",
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+    restarted.dispose()
+
+
+@pytest.mark.parametrize(
+    ("amount", "expected"),
+    [
+        (Decimal("10.00"), "10"),
+        (Decimal("0.0100"), "0.01"),
+        (Decimal("0"), "0"),
+        (Decimal("-0.000"), "0"),
+        (Decimal("1E+3"), "1000"),
+    ],
+)
+def test_decimal_text_round_trip_is_exact_and_canonical(
+    amount: Decimal,
+    expected: str,
+) -> None:
+    encoded = encode_decimal_text(amount)
+
+    assert encoded == expected
+    assert decode_decimal_text(encoded) == amount
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["+1", "1.0", "1e2", "01", "-1", "NaN", "١"],
+)
+def test_decimal_restore_rejects_noncanonical_text(value: str) -> None:
+    with pytest.raises(ValueError, match="каноническим"):
+        decode_decimal_text(value)
 
 
 def test_partial_saves_success_snapshot_and_error_without_replacing_previous_run(
@@ -346,7 +474,10 @@ def test_partial_saves_success_snapshot_and_error_without_replacing_previous_run
         PageOutcome.HTML,
         "HTML обработан",
         200,
-        page_data=page_data("старый текст"),
+        page_data=page_data(
+            "старый текст",
+            prices=(PagePrice(Decimal("100"), "RUB", "price", "json-ld"),),
+        ),
     )
     asyncio.run(
         run_crawl(
@@ -369,7 +500,10 @@ def test_partial_saves_success_snapshot_and_error_without_replacing_previous_run
         PageOutcome.HTML,
         "HTML обработан",
         200,
-        page_data=page_data("новый текст"),
+        page_data=page_data(
+            "новый текст",
+            prices=(PagePrice(Decimal("200"), None, "price", "microdata"),),
+        ),
     )
     error_page = CrawlPageResult(
         "https://example.com/error",
@@ -404,6 +538,11 @@ def test_partial_saves_success_snapshot_and_error_without_replacing_previous_run
         snapshots = list(
             session.exec(select(CrawlPageSnapshot).order_by(CrawlPageSnapshot.crawl_page_record_id))
         )
+        stored_prices = list(
+            session.exec(
+                select(CrawlPagePriceRecord).order_by(CrawlPagePriceRecord.id)
+            )
+        )
 
     assert second.status == "partial"
     assert [run.status for run in runs] == ["completed", "partial"]
@@ -417,6 +556,7 @@ def test_partial_saves_success_snapshot_and_error_without_replacing_previous_run
         "новый текст",
     ]
     assert records[-1].outcome == "http_error"
+    assert [price.amount_text for price in stored_prices] == ["100", "200"]
 
 
 def test_deferred_failed_and_interrupted_runs_publish_no_snapshots(tmp_path: Path) -> None:
@@ -427,7 +567,9 @@ def test_deferred_failed_and_interrupted_runs_publish_no_snapshots(tmp_path: Pat
         PageOutcome.HTML,
         "Не должен публиковаться",
         200,
-        page_data=page_data(),
+        page_data=page_data(
+            prices=(PagePrice(Decimal("1"), "RUB", "price", "json-ld"),)
+        ),
     )
     deferred = asyncio.run(
         run_crawl(
@@ -464,12 +606,14 @@ def test_deferred_failed_and_interrupted_runs_publish_no_snapshots(tmp_path: Pat
         runs = list(session.exec(select(CrawlRun).order_by(CrawlRun.id)))
         records = list(session.exec(select(CrawlPageRecord)))
         snapshots = list(session.exec(select(CrawlPageSnapshot)))
+        prices = list(session.exec(select(CrawlPagePriceRecord)))
 
     assert deferred.status == "deferred"
     assert [run.status for run in runs] == ["deferred", "failed", "interrupted"]
     assert interrupted.id == runs[-1].id
     assert records == []
     assert snapshots == []
+    assert prices == []
 
 
 def test_atomic_finalization_rolls_back_page_when_html_data_is_missing(
@@ -511,13 +655,60 @@ def test_atomic_finalization_rolls_back_page_when_html_data_is_missing(
     assert run.status == "failed"
 
 
-def test_existing_database_gets_snapshot_table_without_losing_data(
+def test_atomic_finalization_rolls_back_pages_snapshots_and_prices(
+    tmp_path: Path,
+) -> None:
+    engine = initialized_engine(tmp_path)
+    invalid_page = CrawlPageResult(
+        "https://example.com/",
+        0,
+        PageOutcome.HTML,
+        "HTML обработан",
+        200,
+        page_data=page_data(
+            prices=(
+                PagePrice(Decimal("10"), "RUB", "price", "json-ld"),
+                PagePrice(Decimal("NaN"), "RUB", "price", "json-ld"),
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="конечным неотрицательным"):
+        asyncio.run(
+            run_crawl(
+                engine,
+                1,
+                invalid_page.url,
+                crawler=ResultCrawler(
+                    engine,
+                    result_with(
+                        pages=(invalid_page,),
+                        counters=CrawlCounters(
+                            processed=1,
+                            requested=1,
+                            successful=1,
+                        ),
+                    ),
+                ),
+            )
+        )
+
+    with Session(engine) as session:
+        run = session.exec(select(CrawlRun)).one()
+        assert session.exec(select(CrawlPageRecord)).all() == []
+        assert session.exec(select(CrawlPageSnapshot)).all() == []
+        assert session.exec(select(CrawlPagePriceRecord)).all() == []
+    assert run.status == "failed"
+
+
+def test_existing_database_gets_price_table_without_losing_data(
     tmp_path: Path,
 ) -> None:
     engine = build_engine(database_url(tmp_path))
     Site.__table__.create(engine)
     CrawlRun.__table__.create(engine)
     CrawlPageRecord.__table__.create(engine)
+    CrawlPageSnapshot.__table__.create(engine)
     with Session(engine) as session:
         site = Site(name="Старый сайт", url="https://old.example/")
         session.add(site)
@@ -534,8 +725,7 @@ def test_existing_database_gets_snapshot_table_without_losing_data(
         )
         session.add(run)
         session.flush()
-        session.add(
-            CrawlPageRecord(
+        page = CrawlPageRecord(
                 crawl_run_id=run.id,
                 sequence_number=1,
                 url="https://old.example/",
@@ -544,17 +734,31 @@ def test_existing_database_gets_snapshot_table_without_losing_data(
                 message="Старая запись",
                 http_status=200,
             )
+        session.add(page)
+        session.flush()
+        session.add(
+            CrawlPageSnapshot(
+                crawl_page_record_id=page.id,
+                checked_at=datetime(2026, 7, 16, 9, 30, tzinfo=UTC),
+                title="Старый заголовок",
+                description=None,
+                h1=None,
+                normalized_text="Старый текст",
+                content_hash=hashlib.sha256("Старый текст".encode("utf-8")).hexdigest(),
+                internal_links_json="[]",
+            )
         )
         session.commit()
 
-    assert "crawlpagesnapshot" not in inspect(engine).get_table_names()
+    assert "crawlpagepricerecord" not in inspect(engine).get_table_names()
     initialize_database(engine)
-    assert "crawlpagesnapshot" in inspect(engine).get_table_names()
+    assert "crawlpagepricerecord" in inspect(engine).get_table_names()
     with Session(engine) as session:
         assert session.exec(select(Site)).one().name == "Старый сайт"
         assert session.exec(select(CrawlRun)).one().message == "Старый запуск"
         assert session.exec(select(CrawlPageRecord)).one().message == "Старая запись"
-        assert session.exec(select(CrawlPageSnapshot)).all() == []
+        assert session.exec(select(CrawlPageSnapshot)).one().title == "Старый заголовок"
+        assert session.exec(select(CrawlPagePriceRecord)).all() == []
 
 
 def test_unexpected_exception_is_saved_as_failed_and_reraised(tmp_path: Path) -> None:

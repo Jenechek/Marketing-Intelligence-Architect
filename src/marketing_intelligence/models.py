@@ -2,9 +2,13 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Column, DateTime, Text
+from decimal import Decimal
+
+from sqlalchemy import Column, DateTime, Text, UniqueConstraint
 from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
+
+from .price_persistence import decode_decimal_text
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -102,3 +106,32 @@ class CrawlPageSnapshot(SQLModel, table=True):
     normalized_text: str = Field(sa_column=Column(Text, nullable=False))
     content_hash: str
     internal_links_json: str = Field(sa_column=Column(Text, nullable=False))
+
+
+class CrawlPagePriceRecord(SQLModel, table=True):
+    """Одна обнаруженная цена, связанная со снимком страницы."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "crawl_page_snapshot_id",
+            "sequence_number",
+            name="uq_crawl_page_price_snapshot_sequence",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    crawl_page_snapshot_id: int = Field(
+        foreign_key="crawlpagesnapshot.crawl_page_record_id",
+        index=True,
+    )
+    sequence_number: int
+    amount_text: str = Field(sa_column=Column(Text, nullable=False))
+    currency: str | None = None
+    kind: str
+    source: str
+
+    @property
+    def amount(self) -> Decimal:
+        """Восстановить точную сумму из проверенного канонического текста."""
+
+        return decode_decimal_text(self.amount_text)
