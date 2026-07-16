@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import func
+from sqlalchemy import event, func
 from sqlmodel import Session, select
 
 from marketing_intelligence.database import build_engine, initialize_database
@@ -15,6 +15,10 @@ from marketing_intelligence.models import (
 from marketing_intelligence.snapshot_pair_storage import (
     CrawlRunNotCompletedError,
     CrawlRunNotFoundError,
+    InternalLinkNotStringError,
+    InternalLinksNotArrayError,
+    InvalidInternalLinksJsonError,
+    load_completed_snapshot_comparison_input,
     load_completed_snapshot_pair,
 )
 
@@ -68,6 +72,13 @@ def add_page(
     url: str,
     *,
     snapshot: bool = True,
+    checked_at: datetime = BASE_TIME,
+    title: str | None = None,
+    description: str | None = None,
+    h1: str | None = None,
+    normalized_text: str = "text",
+    content_hash: str = "hash",
+    internal_links_json: str = "[]",
 ) -> int:
     record = CrawlPageRecord(
         crawl_run_id=run_id,
@@ -84,10 +95,13 @@ def add_page(
         session.add(
             CrawlPageSnapshot(
                 crawl_page_record_id=record.id,
-                checked_at=BASE_TIME,
-                normalized_text="text",
-                content_hash="hash",
-                internal_links_json="[]",
+                checked_at=checked_at,
+                title=title,
+                description=description,
+                h1=h1,
+                normalized_text=normalized_text,
+                content_hash=content_hash,
+                internal_links_json=internal_links_json,
             )
         )
     return record.id
@@ -264,6 +278,227 @@ def test_loading_pair_does_not_change_persisted_data(engine) -> None:
     after = _database_counts(engine)
 
     assert after == before
+
+
+def test_full_first_completed_run_is_baseline_without_new_or_matched_pages(
+    engine,
+) -> None:
+    with Session(engine) as session:
+        site_id = add_site(session)
+        run_id = add_run(session, site_id)
+        add_page(session, run_id, "https://example.com/baseline")
+        session.commit()
+
+    result = load_completed_snapshot_comparison_input(engine, run_id)
+
+    assert result.current_run_id == run_id
+    assert result.previous_run_id is None
+    assert result.current_completed_at == BASE_TIME
+    assert result.creates_baseline is True
+    assert result.new_pages == ()
+    assert result.removed_pages == ()
+    assert result.matched_pages == ()
+
+
+def test_full_pair_loads_new_removed_and_every_matched_page_field(engine) -> None:
+    previous_checked_at = BASE_TIME - timedelta(minutes=2)
+    current_checked_at = BASE_TIME + timedelta(hours=1, minutes=2)
+    with Session(engine) as session:
+        site_id = add_site(session)
+        previous_id = add_run(session, site_id, completed_at=BASE_TIME)
+        removed_page_id = add_page(
+            session, previous_id, "https://example.com/removed"
+        )
+        previous_page_id = add_page(
+            session,
+            previous_id,
+            "https://example.com/same",
+            checked_at=previous_checked_at,
+            title=None,
+            description="",
+            h1="Старый H1",
+            normalized_text="Старый текст ё",
+            content_hash="old-hash",
+            internal_links_json='["/юникод","/a","/юникод"]',
+        )
+        current_id = add_run(
+            session, site_id, completed_at=BASE_TIME + timedelta(hours=1)
+        )
+        new_page_id = add_page(session, current_id, "https://example.com/new")
+        current_page_id = add_page(
+            session,
+            current_id,
+            "https://example.com/same",
+            checked_at=current_checked_at,
+            title="",
+            description=None,
+            h1="Новый H1",
+            normalized_text="Новый текст ё",
+            content_hash="new-hash",
+            internal_links_json='["/z","/a","/z"]',
+        )
+        session.commit()
+
+    result = load_completed_snapshot_comparison_input(engine, current_id)
+
+    assert result.current_run_id == current_id
+    assert result.previous_run_id == previous_id
+    assert result.current_completed_at == BASE_TIME + timedelta(hours=1)
+    assert result.creates_baseline is False
+    assert tuple((page.identifier, page.url) for page in result.new_pages) == (
+        (new_page_id, "https://example.com/new"),
+    )
+    assert tuple((page.identifier, page.url) for page in result.removed_pages) == (
+        (removed_page_id, "https://example.com/removed"),
+    )
+    assert len(result.matched_pages) == 1
+    matched = result.matched_pages[0]
+    assert matched.url == "https://example.com/same"
+    assert (
+        matched.previous.identifier,
+        matched.previous.url,
+        matched.previous.checked_at,
+        matched.previous.title,
+        matched.previous.description,
+        matched.previous.h1,
+        matched.previous.normalized_text,
+        matched.previous.content_hash,
+        matched.previous.internal_links,
+    ) == (
+        previous_page_id,
+        "https://example.com/same",
+        previous_checked_at,
+        None,
+        "",
+        "Старый H1",
+        "Старый текст ё",
+        "old-hash",
+        ("/юникод", "/a", "/юникод"),
+    )
+    assert (
+        matched.current.identifier,
+        matched.current.checked_at,
+        matched.current.title,
+        matched.current.description,
+        matched.current.h1,
+        matched.current.normalized_text,
+        matched.current.content_hash,
+        matched.current.internal_links,
+    ) == (
+        current_page_id,
+        current_checked_at,
+        "",
+        None,
+        "Новый H1",
+        "Новый текст ё",
+        "new-hash",
+        ("/z", "/a", "/z"),
+    )
+    with pytest.raises(FrozenInstanceError):
+        matched.current.title = "изменено"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("stored_value", "error_type", "message"),
+    [
+        ("{", InvalidInternalLinksJsonError, "повреждённый JSON"),
+        ('{"url":"/a"}', InternalLinksNotArrayError, "JSON-массивом"),
+        ('["/a",1]', InternalLinkNotStringError, "только строки"),
+    ],
+)
+def test_full_pair_rejects_each_invalid_internal_links_shape(
+    engine, stored_value, error_type, message
+) -> None:
+    with Session(engine) as session:
+        site_id = add_site(session)
+        previous_id = add_run(session, site_id, completed_at=BASE_TIME)
+        page_id = add_page(
+            session,
+            previous_id,
+            "https://example.com/same",
+            internal_links_json=stored_value,
+        )
+        current_id = add_run(
+            session, site_id, completed_at=BASE_TIME + timedelta(hours=1)
+        )
+        add_page(session, current_id, "https://example.com/same")
+        session.commit()
+
+    with pytest.raises(error_type, match=message) as error:
+        load_completed_snapshot_comparison_input(engine, current_id)
+
+    assert error.value.page_identifier == page_id
+    assert str(page_id) in str(error.value)
+
+
+def test_full_pair_orders_multiple_matches_by_url_and_loads_in_one_batch(engine) -> None:
+    urls = (
+        "https://example.com/юникод",
+        "https://example.com/a",
+        "https://example.com/z",
+    )
+    with Session(engine) as session:
+        site_id = add_site(session)
+        previous_id = add_run(session, site_id, completed_at=BASE_TIME)
+        for url in urls:
+            add_page(session, previous_id, url)
+        current_id = add_run(
+            session, site_id, completed_at=BASE_TIME + timedelta(hours=1)
+        )
+        for url in reversed(urls):
+            add_page(session, current_id, url)
+        session.commit()
+
+    selects: list[str] = []
+
+    def count_selects(_connection, _cursor, statement, *_args) -> None:
+        if statement.lstrip().upper().startswith("SELECT"):
+            selects.append(statement)
+
+    event.listen(engine, "before_cursor_execute", count_selects)
+    try:
+        result = load_completed_snapshot_comparison_input(engine, current_id)
+    finally:
+        event.remove(engine, "before_cursor_execute", count_selects)
+
+    assert tuple(page.url for page in result.matched_pages) == tuple(sorted(urls))
+    assert len(selects) == 3
+
+
+def test_full_pair_preserves_selection_rules_and_sqlite_after_reopening(engine) -> None:
+    database_url = str(engine.url)
+    with Session(engine) as session:
+        site_id = add_site(session, "main")
+        other_site_id = add_site(session, "other")
+        previous_id = add_run(session, site_id, completed_at=BASE_TIME)
+        add_page(session, previous_id, "https://example.com/old")
+        add_run(
+            session,
+            site_id,
+            status="failed",
+            completed_at=BASE_TIME + timedelta(hours=1),
+        )
+        add_run(
+            session,
+            other_site_id,
+            completed_at=BASE_TIME + timedelta(hours=2),
+        )
+        current_id = add_run(
+            session, site_id, completed_at=BASE_TIME + timedelta(hours=3)
+        )
+        add_page(session, current_id, "https://example.com/new")
+        session.commit()
+    before = _database_counts(engine)
+    engine.dispose()
+
+    reopened = build_engine(database_url)
+    result = load_completed_snapshot_comparison_input(reopened, current_id)
+    reopened.dispose()
+    reopened_again = build_engine(database_url)
+
+    assert result.previous_run_id == previous_id
+    assert _database_counts(reopened_again) == before
+    reopened_again.dispose()
 
 
 def _database_counts(engine) -> tuple[int, int, int, int]:
