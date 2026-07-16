@@ -6,7 +6,14 @@ from sqlalchemy import func, text, update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from .crawler import CrawlCounters, CrawlResult, CrawlSettings, CrawlStatus, Crawler
+from .crawler import (
+    CrawlCounters,
+    CrawlResult,
+    CrawlSettings,
+    CrawlStatus,
+    Crawler,
+    PageOutcome,
+)
 from .models import CrawlPageRecord, CrawlRun, Site
 
 
@@ -26,11 +33,26 @@ STATUS_TITLES = {
     INTERRUPTED_STATUS: "Прерван",
 }
 
+ERROR_OUTCOME_TITLES = {
+    PageOutcome.OVERSIZED.value: "Слишком большая HTML-страница",
+    PageOutcome.PARSE_ERROR.value: "Ошибка разбора HTML",
+    PageOutcome.REDIRECT.value: "Перенаправление",
+    PageOutcome.HTTP_ERROR.value: "Ошибка HTTP",
+    PageOutcome.NETWORK_ERROR.value: "Сетевая ошибка",
+    PageOutcome.TIMEOUT.value: "Истекло время ожидания",
+}
+
 
 def crawl_status_title(status: str) -> str:
     """Вернуть понятное русское название сохранённого статуса."""
 
     return STATUS_TITLES.get(status, "Неизвестный статус")
+
+
+def crawl_error_outcome_title(outcome: str) -> str:
+    """Вернуть понятное русское название ошибки страницы."""
+
+    return ERROR_OUTCOME_TITLES.get(outcome, "Неизвестная ошибка страницы")
 
 
 class ActiveCrawlRunError(RuntimeError):
@@ -162,6 +184,22 @@ def get_crawl_run(engine: Engine, run_id: int) -> CrawlRun | None:
 
     with Session(engine) as session:
         return session.get(CrawlRun, run_id)
+
+
+def list_crawl_errors(engine: Engine, run_id: int) -> list[CrawlPageRecord]:
+    """Вернуть сохранённые ошибки страниц в порядке обработки."""
+
+    with Session(engine) as session:
+        return list(
+            session.exec(
+                select(CrawlPageRecord)
+                .where(
+                    CrawlPageRecord.crawl_run_id == run_id,
+                    CrawlPageRecord.outcome.in_(ERROR_OUTCOME_TITLES),
+                )
+                .order_by(CrawlPageRecord.sequence_number)
+            ).all()
+        )
 
 
 def get_running_crawl_run(engine: Engine, site_id: int) -> CrawlRun | None:
