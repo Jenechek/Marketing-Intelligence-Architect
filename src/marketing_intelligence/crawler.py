@@ -17,6 +17,7 @@ from .link_discovery import (
     extract_internal_links,
     normalize_http_url,
 )
+from .page_content import PageData, extract_page_data
 
 
 USER_AGENT = (
@@ -98,6 +99,7 @@ class CrawlPageResult:
     http_status: int | None = None
     discovered_links: tuple[str, ...] = ()
     links_limited: bool = False
+    page_data: PageData | None = None
 
 
 @dataclass(frozen=True)
@@ -381,6 +383,7 @@ async def _read_html_response(
         encoding = response.encoding or "utf-8"
         html = bytes(content).decode(encoding, errors="replace")
         traversal_links, _ = extract_internal_links(html, url, limit=None)
+        page_data = extract_page_data(html, traversal_links)
     except Exception:
         return (
             CrawlPageResult(
@@ -410,6 +413,7 @@ async def _read_html_response(
             status,
             displayed_links,
             links_limited,
+            page_data,
         ),
         traversal_links,
     )
