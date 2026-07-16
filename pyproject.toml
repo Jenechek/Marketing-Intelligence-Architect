@@ -9,9 +9,11 @@ description = "Локальная основа приложения Marketing In
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "beautifulsoup4>=4.13,<5.0",
     "fastapi>=0.115,<1.0",
     "httpx>=0.28,<1.0",
     "jinja2>=3.1,<4.0",
+    "lxml>=5.3,<7.0",
     "sqlmodel>=0.0.24,<0.1",
     "uvicorn>=0.34,<1.0",
 ]

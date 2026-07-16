@@ -3,6 +3,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import httpx
+import pytest
+
+import marketing_intelligence.crawler as crawler_module
 
 from marketing_intelligence.crawler import (
     DEFAULT_MAX_DEPTH,
@@ -285,6 +288,100 @@ def test_streamed_two_mib_limit_records_error_and_continues() -> None:
     assert result.pages[2].outcome is PageOutcome.HTML
 
 
+def test_page_data_exists_only_for_successfully_parsed_html() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        if request.url.path == "/":
+            return html('<a href="/non-html">next</a>')
+        return httpx.Response(200, headers={"Content-Type": "application/pdf"})
+
+    result, _ = run_crawl(
+        handler,
+        settings=CrawlSettings(max_pages=2, max_depth=1, delay=0),
+    )
+
+    assert result.pages[0].page_data is not None
+    assert result.pages[1].page_data is None
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        PageOutcome.NON_HTML,
+        PageOutcome.OVERSIZED,
+        PageOutcome.PARSE_ERROR,
+        PageOutcome.FORBIDDEN,
+        PageOutcome.REDIRECT,
+        PageOutcome.HTTP_ERROR,
+        PageOutcome.NETWORK_ERROR,
+        PageOutcome.TIMEOUT,
+    ],
+)
+def test_unsuccessful_page_outcomes_have_no_page_data(outcome: PageOutcome) -> None:
+    page = crawler_module.CrawlPageResult(
+        "https://example.com/",
+        0,
+        outcome,
+        "not successful HTML",
+    )
+
+    assert page.page_data is None
+
+
+def test_parse_failure_has_no_page_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return html("<p>Текст</p>")
+
+    def fail(*args: object) -> object:
+        raise ValueError("controlled parser failure")
+
+    monkeypatch.setattr(crawler_module, "extract_page_data", fail)
+    result, _ = run_crawl(handler, settings=CrawlSettings(max_pages=1, delay=0))
+
+    assert result.pages[0].outcome is PageOutcome.PARSE_ERROR
+    assert result.pages[0].page_data is None
+
+
+def test_more_than_200_links_keep_full_page_data_without_changing_ui_limit() -> None:
+    links = "".join(f'<a href="/page-{index}">{index}</a>' for index in range(202))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/robots.txt":
+            return httpx.Response(404)
+        return html(links if request.url.path == "/" else "")
+
+    result, _ = run_crawl(
+        handler,
+        settings=CrawlSettings(max_pages=1, max_depth=0, delay=0),
+    )
+    page = result.pages[0]
+
+    assert len(page.discovered_links) == 200
+    assert page.links_limited is True
+    assert page.page_data is not None
+    assert len(page.page_data.internal_links) == 202
+    assert page.page_data.internal_links[-1] == "https://example.com/page-201"
+
+
+def test_positional_crawl_page_result_constructor_remains_compatible() -> None:
+    page = crawler_module.CrawlPageResult(
+        "https://example.com/",
+        0,
+        PageOutcome.HTML,
+        "ok",
+        200,
+        (),
+        False,
+    )
+
+    assert page.page_data is None
+
+
 def test_real_local_server_confirms_exact_safe_request_list() -> None:
     requests: list[str] = []
 
@@ -296,6 +393,10 @@ def test_real_local_server_confirms_exact_safe_request_list() -> None:
                 "/": (
                     200,
                     "text/html",
+                    "<title> Loopback Title </title>"
+                    '<meta name="DESCRIPTION" content=" Loopback Description ">'
+                    "<h1>Loopback H1</h1>"
+                    '<main>Текст <img alt="Изображение"></main>'
                     '<a href="/allowed">ok</a>'
                     '<a href="/blocked">no</a>'
                     '<a href="https://outside.example/no">outside</a>'
@@ -335,6 +436,21 @@ def test_real_local_server_confirms_exact_safe_request_list() -> None:
 
     assert result.status is CrawlStatus.COMPLETED
     assert requests == ["/robots.txt", "/", "/allowed", "/redirect", "/level-one"]
+    page_data = result.pages[0].page_data
+    assert page_data is not None
+    assert page_data.title == "Loopback Title"
+    assert page_data.description == "Loopback Description"
+    assert page_data.h1 == "Loopback H1"
+    assert page_data.normalized_text.startswith(
+        "loopback h1 текст изображение ok no outside redirect level"
+    )
+    assert len(page_data.content_hash) == 64
+    assert page_data.internal_links == (
+        f"http://127.0.0.1:{server.server_port}/allowed",
+        f"http://127.0.0.1:{server.server_port}/blocked",
+        f"http://127.0.0.1:{server.server_port}/redirect",
+        f"http://127.0.0.1:{server.server_port}/level-one",
+    )
     assert "/blocked" not in requests
     assert "/redirect-target" not in requests
     assert "/too-deep" not in requests
