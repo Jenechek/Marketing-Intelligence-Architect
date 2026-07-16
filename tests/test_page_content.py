@@ -1,10 +1,12 @@
 from dataclasses import FrozenInstanceError
 from datetime import timezone
+from decimal import Decimal
 import hashlib
 
 import pytest
 
 from marketing_intelligence.page_content import (
+    PagePrice,
     extract_page_data,
     normalize_main_text,
 )
@@ -143,3 +145,169 @@ def test_checked_at_is_timezone_aware_utc_and_links_are_passed_through() -> None
     assert data.checked_at.tzinfo is timezone.utc
     assert data.checked_at.utcoffset().total_seconds() == 0
     assert data.internal_links is links
+
+
+def test_extracts_json_ld_offer_graph_arrays_and_nested_offers() -> None:
+    data = extract_page_data(
+        """
+        <script type="application/ld+json">
+        {"@graph": [
+          {"@type": "Product", "offers": [
+            {"@type": "Offer", "price": 0, "priceCurrency": "rub"},
+            {"@type": "Offer", "price": "19,90"}
+          ]},
+          {"@type": "AggregateOffer", "lowPrice": "10.00",
+           "highPrice": 25, "priceCurrency": "usd"}
+        ]}
+        </script>
+        """,
+        (),
+    )
+
+    assert data.prices == (
+        PagePrice(Decimal("0"), "RUB", "price", "json-ld"),
+        PagePrice(Decimal("19.90"), None, "price", "json-ld"),
+        PagePrice(Decimal("10.00"), "USD", "low", "json-ld"),
+        PagePrice(Decimal("25"), "USD", "high", "json-ld"),
+    )
+
+
+def test_offer_price_wins_over_active_unit_price_specification() -> None:
+    data = extract_page_data(
+        """
+        <script type="application/ld+json">
+        {"@type": "Offer", "price": "100", "priceCurrency": "RUB",
+         "priceSpecification":
+           {"price": "90", "priceCurrency": "RUB"}}
+        </script>
+        <div itemscope itemtype="https://schema.org/Offer">
+          <meta itemprop="price" content="200">
+          <meta itemprop="priceCurrency" content="usd">
+          <div itemprop="priceSpecification" itemscope>
+            <meta itemprop="price" content="180">
+          </div>
+        </div>
+        """,
+        (),
+    )
+
+    assert data.prices == (
+        PagePrice(Decimal("100"), "RUB", "price", "json-ld"),
+        PagePrice(Decimal("200"), "USD", "price", "microdata"),
+    )
+
+
+def test_extracts_active_unit_price_and_ignores_typed_old_price() -> None:
+    data = extract_page_data(
+        """
+        <script type="application/ld+json">
+        [
+          {"@type": "UnitPriceSpecification", "price": "75",
+           "priceCurrency": "eur"},
+          {"@type": "UnitPriceSpecification", "price": "99",
+           "priceType": "https://schema.org/StrikethroughPrice"}
+        ]
+        </script>
+        <div itemscope itemtype="https://schema.org/Offer">
+          <meta itemprop="priceCurrency" content="rub">
+          <div itemprop="priceSpecification" itemscope
+               itemtype="https://schema.org/UnitPriceSpecification">
+            <span itemprop="price" content="45.50">1 000 ₽</span>
+          </div>
+        </div>
+        <div itemscope itemtype="https://schema.org/UnitPriceSpecification">
+          <meta itemprop="price" content="60">
+          <meta itemprop="priceType" content="StrikethroughPrice">
+        </div>
+        """,
+        (),
+    )
+
+    assert data.prices == (
+        PagePrice(Decimal("75"), "EUR", "price", "json-ld"),
+        PagePrice(Decimal("45.50"), "RUB", "price", "microdata"),
+    )
+
+
+def test_microdata_range_prefers_content_and_matches_json_ld_kinds() -> None:
+    data = extract_page_data(
+        """
+        <div itemscope itemtype="https://schema.org/AggregateOffer">
+          <span itemprop="lowPrice" content="10,5">999</span>
+          <meta itemprop="highPrice" content="20">
+          <meta itemprop="priceCurrency" content="gbp">
+        </div>
+        """,
+        (),
+    )
+
+    assert data.prices == (
+        PagePrice(Decimal("10.5"), "GBP", "low", "microdata"),
+        PagePrice(Decimal("20"), "GBP", "high", "microdata"),
+    )
+
+
+def test_deduplicates_exact_prices_preserving_first_source_and_order() -> None:
+    data = extract_page_data(
+        """
+        <script type="application/ld+json">
+        [{"@type":"Offer","price":"10.0","priceCurrency":"RUB"},
+         {"@type":"Offer","price":"20","priceCurrency":"RUB"}]
+        </script>
+        <div itemscope itemtype="https://schema.org/Offer">
+          <meta itemprop="price" content="10.00">
+          <meta itemprop="priceCurrency" content="rub">
+        </div>
+        """,
+        (),
+    )
+
+    assert data.prices == (
+        PagePrice(Decimal("10.0"), "RUB", "price", "json-ld"),
+        PagePrice(Decimal("20"), "RUB", "price", "json-ld"),
+    )
+
+
+def test_ignores_ambiguous_invalid_and_malformed_values_safely() -> None:
+    data = extract_page_data(
+        """
+        <title>Прежние данные</title><p>Цена 777 ₽</p>
+        <script type="application/ld+json">{"broken":</script>
+        <script type="application/ld+json">
+        [{"@type":"Offer","price":"1,234,56","priceCurrency":"₽"},
+         {"@type":"Offer","price":"-1"},
+         {"@type":"Offer","price":"NaN"},
+         {"@type":"Offer","price":"1e3"}]
+        </script>
+        """,
+        (),
+    )
+
+    assert data.prices == ()
+    assert data.title == "Прежние данные"
+    assert data.normalized_text == "цена 777"
+
+
+def test_page_price_is_frozen_and_page_without_schema_has_empty_tuple() -> None:
+    data = extract_page_data("<p>Обычная страница</p>", ())
+    price = PagePrice(Decimal("1"), None, "price", "json-ld")
+
+    assert data.prices == ()
+    with pytest.raises(FrozenInstanceError):
+        price.amount = Decimal("2")  # type: ignore[misc]
+
+
+def test_excessively_nested_json_ld_is_ignored_without_partial_prices() -> None:
+    nested = '{"next":' * 2000 + "null" + "}" * 2000
+    html = (
+        "<title>Рабочая страница</title><p>Основной текст</p>"
+        '<script type="application/ld+json">'
+        '[{"@type":"Offer","price":"10","priceCurrency":"RUB"},'
+        f"{nested}]</script>"
+    )
+
+    data = extract_page_data(html, ())
+
+    assert data.prices == ()
+    assert data.title == "Рабочая страница"
+    assert data.normalized_text == "основной текст"
