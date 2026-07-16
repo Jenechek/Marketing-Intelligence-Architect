@@ -4,6 +4,8 @@
 
 This repository contains Marketing Intelligence, a local-first web application for a non-technical Russian-speaking internet marketer.
 
+The first development version is local, but the required production target is a multi-user deployment on the user's corporate server. Preserve that future deployment path in current designs without introducing server infrastructure before its approved stage; see DEC-022.
+
 Always read:
 
 - this file;
@@ -22,7 +24,8 @@ Do not reread unrelated unchanged documents. If sources conflict, stop and repor
 
 ## Product constraints
 
-- Keep the application local-first and useful without paid services, mandatory cloud hosting, paid proxies, or paid AI APIs.
+- Keep the current application local-first and useful without paid services, mandatory public cloud hosting, paid proxies, or paid AI APIs.
+- Preserve the mandatory path to a multi-user corporate-server deployment; do not add PostgreSQL, authentication infrastructure, distributed workers, or deployment components before the stage that needs them.
 - Free external services may be optional integrations only.
 - Prefer simple, maintainable, open-source, locally installable solutions with suitable licenses.
 - Use a modular monolith; do not add microservices, Redis, Celery, Elasticsearch, Kubernetes, or similar infrastructure without a measured need and recorded decision.
@@ -30,7 +33,7 @@ Do not reread unrelated unchanged documents. If sources conflict, stop and repor
 - Never claim that a test or command succeeded unless it was actually run.
 - Never commit credentials, generated databases, browser profiles, logs, environments, or large crawl archives.
 
-Approved stack: Python, FastAPI, SQLite, SQLModel, server-rendered HTML or minimal JavaScript, HTTPX, BeautifulSoup, lxml, APScheduler, Pytest, and Git. Use Playwright only when ordinary HTTP retrieval is demonstrably insufficient. Add dependencies only for a current requirement when no simpler option is adequate.
+Approved stack for the current local version: Python, FastAPI, SQLite, SQLModel, server-rendered HTML or minimal JavaScript, HTTPX, BeautifulSoup, lxml, APScheduler, Pytest, and Git. Use Playwright only when ordinary HTTP retrieval is demonstrably insufficient. PostgreSQL becomes mandatory at the approved corporate-server stage; pure SQLAlchemy remains conditional on a separate measured need. Add dependencies only for a current requirement when no simpler option is adequate.
 
 ## Architecture and implementation
 
@@ -38,6 +41,9 @@ Approved stack: Python, FastAPI, SQLite, SQLModel, server-rendered HTML or minim
 - Keep crawling, parsing, comparison, persistence, and presentation as distinct modules with clear interfaces.
 - Avoid global mutable state, duplicate implementations, premature abstractions, and dead code.
 - Keep configuration outside source code and secrets in ignored environment or local configuration.
+- Avoid hard-coded machine paths and Windows-only assumptions; keep runtime paths, database URLs, hosts, ports, and other deployment settings configurable.
+- Keep durable data and long-running-operation state behind explicit persistence interfaces; do not introduce new correctness-critical state that exists only in one process memory.
+- Isolate database-engine, session, transaction, locking, and filesystem details so future PostgreSQL and corporate-server migration do not require changes to crawling, parsing, comparison, or presentation logic.
 - Make database changes explicit and reversible; preserve previously collected data.
 - Make the smallest coherent change that completes the current task and preserve unrelated behavior.
 - Add or update relevant tests and handle expected errors.
