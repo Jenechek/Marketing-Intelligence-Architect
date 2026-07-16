@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 
 from .models import (
     AvailabilityCheck,
+    CrawlPagePriceRecord,
     CrawlPageRecord,
     CrawlPageSnapshot,
     CrawlRun,
@@ -123,6 +124,11 @@ def delete_site(engine: Engine, site_id: int) -> bool:
         run_ids = select(CrawlRun.id).where(CrawlRun.site_id == site_id)
         page_ids = select(CrawlPageRecord.id).where(
             CrawlPageRecord.crawl_run_id.in_(run_ids)
+        )
+        session.exec(
+            delete(CrawlPagePriceRecord).where(
+                CrawlPagePriceRecord.crawl_page_snapshot_id.in_(page_ids)
+            )
         )
         session.exec(
             delete(CrawlPageSnapshot).where(
