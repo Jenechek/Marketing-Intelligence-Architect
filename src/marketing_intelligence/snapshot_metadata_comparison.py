@@ -13,8 +13,9 @@ class MetadataField(str, Enum):
 
 
 class ChangeImportance(str, Enum):
-    """Уровень важности изменения метаданных."""
+    """Уровень важности изменения содержимого страницы."""
 
+    LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
 
