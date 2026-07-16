@@ -142,8 +142,146 @@ def test_background_progress_completion_and_ui_availability(tmp_path: Path) -> N
         assert 'data-run-status="completed"' in completed.text
         assert 'http-equiv="refresh"' not in completed.text
         assert "Ограничение обхода не достигнуто" in completed.text
+        assert "Журнал ошибок" not in completed.text
         with Session(app.state.engine) as session:
             assert len(session.exec(select(CrawlPageRecord)).all()) == 1
+
+
+def test_completed_run_shows_only_ordered_saved_errors_after_restart(
+    tmp_path: Path,
+) -> None:
+    app = build_app(tmp_path)
+    outcomes = [
+        (6, "timeout", "Истекло время ожидания", None),
+        (2, "oversized", "Слишком большая HTML-страница", 200),
+        (4, "redirect", "Перенаправление", 302),
+        (3, "parse_error", "Ошибка разбора HTML", 200),
+        (7, "network_error", "Сетевая ошибка", 200),
+        (5, "http_error", "Ошибка HTTP", 503),
+    ]
+    with TestClient(app) as client:
+        add_site(client)
+        with Session(app.state.engine) as session:
+            run = CrawlRun(
+                site_id=1,
+                status="partial",
+                message="Ограниченный обход завершён.",
+                max_pages=20,
+                max_depth=2,
+                delay=0,
+                timeout=5,
+                user_agent="TestBot/1.0",
+                processed=9,
+                requested=8,
+                successful=1,
+                forbidden=1,
+                errors=6,
+                limited=False,
+            )
+            session.add(run)
+            session.flush()
+            assert run.id is not None
+            run_id = run.id
+            records = [
+                CrawlPageRecord(
+                    crawl_run_id=run_id,
+                    sequence_number=1,
+                    url="https://example.com/success",
+                    depth=0,
+                    outcome="html",
+                    message="Успешная страница не должна быть в журнале",
+                    http_status=200,
+                ),
+                CrawlPageRecord(
+                    crawl_run_id=run_id,
+                    sequence_number=8,
+                    url="https://example.com/non-html",
+                    depth=1,
+                    outcome="non_html",
+                    message="Не HTML не должен быть в журнале",
+                    http_status=200,
+                ),
+                CrawlPageRecord(
+                    crawl_run_id=run_id,
+                    sequence_number=9,
+                    url="https://example.com/forbidden",
+                    depth=1,
+                    outcome="forbidden",
+                    message="Запрет не должен быть в журнале",
+                ),
+            ]
+            records.extend(
+                CrawlPageRecord(
+                    crawl_run_id=run_id,
+                    sequence_number=sequence,
+                    url=f"https://example.com/error-{sequence}",
+                    depth=1,
+                    outcome=outcome,
+                    message=f"Сохранённое объяснение {sequence}",
+                    http_status=http_status,
+                )
+                for sequence, outcome, _title, http_status in outcomes
+            )
+            session.add_all(records)
+            session.commit()
+
+        response = client.get(f"/crawl-runs/{run_id}")
+
+    assert response.status_code == 200
+    assert '<summary>Журнал ошибок (6)</summary>' in response.text
+    assert "Завершён частично" in response.text
+    assert "Ошибок страниц</dt><dd>6" in response.text
+    assert response.text.count("HTTP-код</dt><dd>") == 5
+    assert "HTTP-код</dt><dd>0" not in response.text
+    for _sequence, _outcome, title, _http_status in outcomes:
+        assert title in response.text
+    assert "Успешная страница не должна быть в журнале" not in response.text
+    assert "Не HTML не должен быть в журнале" not in response.text
+    assert "Запрет не должен быть в журнале" not in response.text
+    positions = [response.text.index(f"error-{sequence}") for sequence in range(2, 8)]
+    assert positions == sorted(positions)
+
+    restarted = build_app(tmp_path)
+    with TestClient(restarted) as client:
+        persisted = client.get(f"/crawl-runs/{run_id}")
+    assert '<summary>Журнал ошибок (6)</summary>' in persisted.text
+    assert "Сохранённое объяснение 6" in persisted.text
+
+
+@pytest.mark.parametrize("status", ["running", "deferred", "failed", "interrupted"])
+def test_existing_run_states_keep_visible_reason_without_empty_journal(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    app = build_app(tmp_path)
+    with TestClient(app) as client:
+        add_site(client)
+        with Session(app.state.engine) as session:
+            run = CrawlRun(
+                site_id=1,
+                status=status,
+                message=f"Причина состояния: {status}",
+                max_pages=20,
+                max_depth=2,
+                delay=0,
+                timeout=5,
+                user_agent="TestBot/1.0",
+                processed=0,
+                requested=0,
+                successful=0,
+                forbidden=0,
+                errors=0,
+            )
+            session.add(run)
+            session.commit()
+            session.refresh(run)
+            assert run.id is not None
+            run_id = run.id
+        response = client.get(f"/crawl-runs/{run_id}")
+
+    assert response.status_code == 200
+    assert f"Причина состояния: {status}" in response.text
+    assert "Журнал ошибок" not in response.text
 
 
 def test_valid_boundaries_and_comma_are_passed_and_saved(tmp_path: Path) -> None:
@@ -539,3 +677,68 @@ def test_real_loopback_crawl_finishes_through_server_ui(tmp_path: Path) -> None:
     assert "LoopbackSettingsBot/1.0" in result.text
     assert requests == ["/robots.txt", "/"]
     assert user_agents == ["LoopbackSettingsBot/1.0", "LoopbackSettingsBot/1.0"]
+
+
+def test_real_loopback_partial_crawl_shows_http_error_journal(tmp_path: Path) -> None:
+    requests: list[str] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.path)
+            if self.path == "/robots.txt":
+                self.send_response(404)
+                self.end_headers()
+                return
+            if self.path == "/error":
+                self.send_response(503)
+                self.end_headers()
+                return
+            body = b'<html><body><a href="/error">error</a></body></html>'
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    app = build_app(tmp_path)
+    try:
+        with TestClient(app) as client:
+            add_site(client, f"http://127.0.0.1:{server.server_port}/")
+            response = client.post(
+                "/sites/1/crawl",
+                data={
+                    "action_token": crawl_token(client),
+                    "max_pages": "2",
+                    "max_depth": "1",
+                    "delay": "0,5",
+                    "timeout": "2",
+                    "user_agent": "LoopbackErrorBot/1.0",
+                },
+                follow_redirects=False,
+            )
+            assert response.status_code == 303
+            for _ in range(300):
+                result = client.get(response.headers["location"])
+                if 'data-run-status="partial"' in result.text:
+                    break
+                time.sleep(0.01)
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+    assert 'data-run-status="partial"' in result.text
+    assert "Завершён частично" in result.text
+    assert "Ошибок страниц</dt><dd>1" in result.text
+    assert '<summary>Журнал ошибок (1)</summary>' in result.text
+    assert f"http://127.0.0.1:{server.server_port}/error" in result.text
+    assert "Ошибка HTTP" in result.text
+    assert "HTTP-код</dt><dd>503" in result.text
+    assert "Страница вернула ответ, который нельзя считать успешным." in result.text
+    assert requests == ["/robots.txt", "/", "/error"]

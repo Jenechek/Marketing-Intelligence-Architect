@@ -35,10 +35,12 @@ from .crawl_history import (
     ActiveCrawlRunError,
     RUNNING_STATUS,
     count_crawl_data,
+    crawl_error_outcome_title,
     crawl_status_title,
     execute_crawl_run,
     get_crawl_run,
     get_running_crawl_run,
+    list_crawl_errors,
     recover_interrupted_runs,
     start_crawl_run,
 )
@@ -485,16 +487,19 @@ def create_app(
         site = get_site(request.app.state.engine, run.site_id)
         if site is None:
             return render_crawl_not_found(request)
+        crawl_errors = list_crawl_errors(request.app.state.engine, run_id)
         return templates.TemplateResponse(
             request=request,
             name="crawl_run.html",
             context={
                 "site": site,
                 "run": run,
+                "crawl_errors": crawl_errors,
                 "is_running": run.status == RUNNING_STATUS,
                 "duplicate": request.query_params.get("duplicate") == "1",
                 "to_local_datetime": to_local_datetime,
                 "status_title": crawl_status_title,
+                "error_outcome_title": crawl_error_outcome_title,
             },
         )
 

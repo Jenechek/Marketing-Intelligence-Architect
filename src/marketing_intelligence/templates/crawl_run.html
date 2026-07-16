@@ -52,6 +52,23 @@
                 {% if run.limited %}Достигнуто ограничение обхода.{% else %}Ограничение обхода не достигнуто.{% endif %}
             </div>
             {% endif %}
+            {% if crawl_errors %}
+            <details class="technical-settings">
+                <summary>Журнал ошибок ({{ crawl_errors|length }})</summary>
+                <ol>
+                    {% for error in crawl_errors %}
+                    <li>
+                        <dl class="summary-list">
+                            <div><dt>URL</dt><dd class="technical-value">{{ error.url }}</dd></div>
+                            <div><dt>Тип</dt><dd>{{ error_outcome_title(error.outcome) }}</dd></div>
+                            {% if error.http_status is not none %}<div><dt>HTTP-код</dt><dd>{{ error.http_status }}</dd></div>{% endif %}
+                            <div><dt>Объяснение</dt><dd>{{ error.message }}</dd></div>
+                        </dl>
+                    </li>
+                    {% endfor %}
+                </ol>
+            </details>
+            {% endif %}
             <details class="technical-settings">
                 <summary>Фактически использованные настройки</summary>
                 <dl class="summary-list">
