@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from enum import Enum
 
+from .change_importance import ChangeImportance
+
 
 class MetadataField(str, Enum):
     """Поддерживаемое поле метаданных страницы."""
@@ -10,14 +12,6 @@ class MetadataField(str, Enum):
     TITLE = "title"
     DESCRIPTION = "description"
     H1 = "h1"
-
-
-class ChangeImportance(str, Enum):
-    """Уровень важности изменения содержимого страницы."""
-
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
 
 
 @dataclass(frozen=True)
