@@ -5,6 +5,7 @@ import re
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
@@ -44,11 +45,13 @@ def crawl_token(client: TestClient, site_id: int = 1) -> str:
     response = client.get(f"/sites/{site_id}/crawl")
     assert response.status_code == 200
     assert response.text.count('class="primary-action"') == 1
-    assert "Страниц не более</dt><dd>200" in response.text
-    assert "Глубина</dt><dd>3" in response.text
-    assert "Задержка</dt><dd>1 с" in response.text
-    assert "Ожидание ответа</dt><dd>15 с" in response.text
-    assert "Одновременных запросов</dt><dd>1" in response.text
+    assert '<details class="advanced-settings">' in response.text
+    assert '<details class="advanced-settings" open>' not in response.text
+    assert 'name="max_pages" type="number" min="1" max="200" step="1" value="200"' in response.text
+    assert 'name="max_depth" type="number" min="0" max="10" step="1" value="3"' in response.text
+    assert 'name="delay" type="text" inputmode="decimal" value="1"' in response.text
+    assert 'name="timeout" type="text" inputmode="decimal" value="15"' in response.text
+    assert "Одновременных запросов всегда 1" in response.text
     match = re.search(r'name="action_token" value="([^"]+)"', response.text)
     assert match is not None
     return match.group(1)
@@ -72,9 +75,11 @@ class BlockingCrawler:
         self.started = threading.Event()
         self.release = threading.Event()
         self.calls = 0
+        self.settings = None
 
     async def crawl(self, start_url, settings, *, progress=None):
         self.calls += 1
+        self.settings = settings
         self.started.set()
         if progress is not None:
             await progress(CrawlCounters(processed=1, requested=1, successful=1))
@@ -124,6 +129,8 @@ def test_background_progress_completion_and_ui_availability(tmp_path: Path) -> N
         assert "1</strong> / 200 страниц обработано" in progress.text
         assert "Запрошено</dt><dd>1" in progress.text
         assert page_records_while_running == []
+        assert crawler.settings == CrawlSettings()
+        assert saved_runs(app)[0].max_pages == 200
 
         crawler.release.set()
         for _ in range(100):
@@ -137,6 +144,141 @@ def test_background_progress_completion_and_ui_availability(tmp_path: Path) -> N
         assert "Ограничение обхода не достигнуто" in completed.text
         with Session(app.state.engine) as session:
             assert len(session.exec(select(CrawlPageRecord)).all()) == 1
+
+
+def test_valid_boundaries_and_comma_are_passed_and_saved(tmp_path: Path) -> None:
+    crawler = BlockingCrawler()
+    app = build_app(tmp_path, crawler)
+
+    with TestClient(app) as client:
+        add_site(client)
+        response = client.post(
+            "/sites/1/crawl",
+            data={
+                "action_token": crawl_token(client),
+                "max_pages": "1",
+                "max_depth": "10",
+                "delay": "0,5",
+                "timeout": "120",
+                "user_agent": "  BoundaryBot/1.0  ",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert crawler.started.wait(2)
+        run = saved_runs(app)[0]
+        result_screen = client.get(response.headers["location"])
+        crawler.release.set()
+
+    expected = CrawlSettings(
+        max_pages=1,
+        max_depth=10,
+        delay=0.5,
+        timeout=120.0,
+        user_agent="BoundaryBot/1.0",
+    )
+    assert crawler.settings == expected
+    assert (run.max_pages, run.max_depth, run.delay, run.timeout, run.user_agent) == (
+        1,
+        10,
+        0.5,
+        120.0,
+        "BoundaryBot/1.0",
+    )
+    assert "Фактически использованные настройки" in result_screen.text
+    assert "Максимум страниц</dt><dd>1" in result_screen.text
+    assert "Максимальная глубина</dt><dd>10" in result_screen.text
+    assert "Задержка</dt><dd>0.5 с" in result_screen.text
+    assert "Ожидание ответа</dt><dd>120.0 с" in result_screen.text
+    assert "BoundaryBot/1.0" in result_screen.text
+    assert "Одновременных запросов</dt><dd>1" in result_screen.text
+
+
+def test_other_valid_boundaries_are_accepted(tmp_path: Path) -> None:
+    crawler = BlockingCrawler()
+    app = build_app(tmp_path, crawler)
+
+    with TestClient(app) as client:
+        add_site(client)
+        response = client.post(
+            "/sites/1/crawl",
+            data={
+                "action_token": crawl_token(client),
+                "max_pages": "200",
+                "max_depth": "0",
+                "delay": "60.0",
+                "timeout": "1,0",
+                "user_agent": "X",
+            },
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        assert crawler.started.wait(2)
+        crawler.release.set()
+
+    assert crawler.settings == CrawlSettings(
+        max_pages=200,
+        max_depth=0,
+        delay=60.0,
+        timeout=1.0,
+        user_agent="X",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_pages", "0"),
+        ("max_pages", "201"),
+        ("max_pages", "1.5"),
+        ("max_depth", "-1"),
+        ("max_depth", "11"),
+        ("max_depth", "не число"),
+        ("delay", "0,49"),
+        ("delay", "60,1"),
+        ("delay", "1e1"),
+        ("timeout", "0,9"),
+        ("timeout", "121"),
+        ("timeout", "не число"),
+        ("user_agent", "   "),
+        ("user_agent", "Bot\nInjected"),
+        ("user_agent", "Bot\rInjected"),
+        ("user_agent", "Bot\x7fInjected"),
+        ("user_agent", "X" * 201),
+    ],
+)
+def test_each_invalid_setting_preserves_form_without_run_or_network(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    crawler = BlockingCrawler()
+    app = build_app(tmp_path, crawler)
+
+    with TestClient(app) as client:
+        add_site(client)
+        data = {
+            "action_token": crawl_token(client),
+            "max_pages": "17",
+            "max_depth": "4",
+            "delay": "1,25",
+            "timeout": "22,5",
+            "user_agent": "TestBot/1.0",
+        }
+        data[field] = value
+        response = client.post("/sites/1/crawl", data=data)
+
+    assert response.status_code == 422
+    assert "Обход не запущен. Проверьте отмеченные поля." in response.text
+    assert '<details class="advanced-settings" open>' in response.text
+    assert f'id="{field}"' in response.text
+    assert 'aria-invalid="true"' in response.text
+    if field != "max_pages":
+        assert 'name="max_pages" type="number" min="1" max="200" step="1" value="17"' in response.text
+    if field != "delay":
+        assert 'name="delay" type="text" inputmode="decimal" value="1,25"' in response.text
+    assert crawler.calls == 0
+    assert saved_runs(app) == []
 
 
 def test_duplicate_start_redirects_to_active_run_without_new_network(tmp_path: Path) -> None:
@@ -339,15 +481,17 @@ def test_delete_guard_uses_persisted_running_status_without_background_task(
 
 def test_real_loopback_crawl_finishes_through_server_ui(tmp_path: Path) -> None:
     requests: list[str] = []
+    user_agents: list[str] = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append(self.path)
+            user_agents.append(self.headers["User-Agent"])
             if self.path == "/robots.txt":
                 self.send_response(404)
                 self.end_headers()
                 return
-            body = b"<html><body>ok</body></html>"
+            body = b'<html><body><a href="/not-requested">next</a></body></html>'
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
             self.send_header("Content-Length", str(len(body)))
@@ -366,7 +510,14 @@ def test_real_loopback_crawl_finishes_through_server_ui(tmp_path: Path) -> None:
             add_site(client, f"http://127.0.0.1:{server.server_port}/")
             response = client.post(
                 "/sites/1/crawl",
-                data={"action_token": crawl_token(client)},
+                data={
+                    "action_token": crawl_token(client),
+                    "max_pages": "1",
+                    "max_depth": "0",
+                    "delay": "0,5",
+                    "timeout": "2,5",
+                    "user_agent": "LoopbackSettingsBot/1.0",
+                },
                 follow_redirects=False,
             )
             assert response.status_code == 303
@@ -381,5 +532,10 @@ def test_real_loopback_crawl_finishes_through_server_ui(tmp_path: Path) -> None:
         server.server_close()
 
     assert 'data-run-status="completed"' in result.text
-    assert "1</strong> / 200 страниц обработано" in result.text
+    assert "1</strong> / 1 страниц обработано" in result.text
+    assert "Максимальная глубина</dt><dd>0" in result.text
+    assert "Задержка</dt><dd>0.5 с" in result.text
+    assert "Ожидание ответа</dt><dd>2.5 с" in result.text
+    assert "LoopbackSettingsBot/1.0" in result.text
     assert requests == ["/robots.txt", "/"]
+    assert user_agents == ["LoopbackSettingsBot/1.0", "LoopbackSettingsBot/1.0"]

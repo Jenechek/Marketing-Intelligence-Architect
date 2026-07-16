@@ -55,7 +55,7 @@ h2, h3, p { margin-top: 0; }
 }
 
 .primary-action:hover { background: #19478e; }
-.primary-action:focus-visible, .danger-action:focus-visible, input:focus-visible, a:focus-visible { outline: 3px solid #ef9d2d; outline-offset: 3px; }
+.primary-action:focus-visible, .danger-action:focus-visible, input:focus-visible, a:focus-visible, summary:focus-visible { outline: 3px solid #ef9d2d; outline-offset: 3px; }
 
 .secondary-action {
     display: inline-flex;
@@ -136,6 +136,12 @@ input[aria-invalid="true"] { border-color: #b83b3b; }
 .field-help, .field-error { margin: 7px 0 0; font-size: 0.92rem; }
 .field-help { color: #647188; }
 .field-error { color: #9a2727; font-weight: 650; }
+.advanced-settings, .technical-settings { margin: 20px 0 24px; padding: 16px; border: 1px solid #dbe3ef; border-radius: 12px; }
+.advanced-settings summary, .technical-settings summary { cursor: pointer; font-weight: 700; }
+.advanced-settings-fields { padding-top: 20px; }
+.advanced-settings-fields .field:last-child { margin-bottom: 0; }
+.technical-settings .summary-list { margin-bottom: 0; }
+.technical-value { max-width: 380px; overflow-wrap: anywhere; }
 
 .danger-zone {
     display: flex;
