@@ -1,6 +1,7 @@
 """Транзакционное хранение запусков обхода и метаданных страниц."""
 
 from datetime import UTC, datetime
+import json
 
 from sqlalchemy import func, text, update
 from sqlalchemy.engine import Engine
@@ -14,7 +15,7 @@ from .crawler import (
     Crawler,
     PageOutcome,
 )
-from .models import CrawlPageRecord, CrawlRun, Site
+from .models import CrawlPageRecord, CrawlPageSnapshot, CrawlRun, Site
 
 
 RUNNING_STATUS = "running"
@@ -70,7 +71,7 @@ def start_crawl_run(
 ) -> CrawlRun:
     """Зафиксировать запуск до обращения к crawler."""
 
-    with Session(engine) as session:
+    with Session(engine, expire_on_commit=False) as session:
         session.exec(text("BEGIN IMMEDIATE"))
         if session.get(Site, site_id) is None:
             raise LookupError("Сайт для запуска обхода не найден.")
@@ -104,7 +105,6 @@ def start_crawl_run(
         )
         session.add(run)
         session.commit()
-        session.refresh(run)
         return run
 
 
@@ -153,10 +153,10 @@ async def execute_crawl_run(
             active_settings,
             progress=save_progress,
         )
+        return _complete_crawl_run(engine, run_id, result)
     except Exception as error:
         _fail_crawl_run(engine, run_id, error)
         raise
-    return _complete_crawl_run(engine, run_id, result)
 
 
 def update_crawl_progress(
@@ -234,8 +234,8 @@ def recover_interrupted_runs(engine: Engine) -> int:
         return result.rowcount or 0
 
 
-def count_crawl_data(engine: Engine, site_id: int) -> tuple[int, int]:
-    """Вернуть отдельные количества запусков и записей страниц сайта."""
+def count_crawl_data(engine: Engine, site_id: int) -> tuple[int, int, int]:
+    """Вернуть количества запусков, страниц и снимков выбранного сайта."""
 
     with Session(engine) as session:
         runs = session.exec(
@@ -249,7 +249,17 @@ def count_crawl_data(engine: Engine, site_id: int) -> tuple[int, int]:
             .join(CrawlRun, CrawlPageRecord.crawl_run_id == CrawlRun.id)
             .where(CrawlRun.site_id == site_id)
         ).one()
-        return runs, pages
+        snapshots = session.exec(
+            select(func.count())
+            .select_from(CrawlPageSnapshot)
+            .join(
+                CrawlPageRecord,
+                CrawlPageSnapshot.crawl_page_record_id == CrawlPageRecord.id,
+            )
+            .join(CrawlRun, CrawlPageRecord.crawl_run_id == CrawlRun.id)
+            .where(CrawlRun.site_id == site_id)
+        ).one()
+        return runs, pages, snapshots
 
 
 def _complete_crawl_run(
@@ -260,13 +270,14 @@ def _complete_crawl_run(
     if run_id is None:
         raise LookupError("Начатый запуск обхода не имеет идентификатора.")
 
-    with Session(engine) as session:
+    with Session(engine, expire_on_commit=False) as session:
         run = session.get(CrawlRun, run_id)
         if run is None:
             raise LookupError("Начатый запуск обхода не найден.")
 
+        stored_status = _stored_status(result)
         run.completed_at = datetime.now(UTC)
-        run.status = _stored_status(result)
+        run.status = stored_status
         run.message = result.message
         run.robots_status = result.robots_status
         run.processed = result.counters.processed
@@ -276,20 +287,42 @@ def _complete_crawl_run(
         run.errors = result.counters.errors
         run.limited = result.limited
         session.add(run)
-        session.add_all(
-            CrawlPageRecord(
-                crawl_run_id=run_id,
-                sequence_number=sequence_number,
-                url=page.url,
-                depth=page.depth,
-                outcome=page.outcome.value,
-                message=page.message,
-                http_status=page.http_status,
-            )
-            for sequence_number, page in enumerate(result.pages, start=1)
-        )
+        if stored_status in {COMPLETED_STATUS, PARTIAL_STATUS}:
+            for sequence_number, page in enumerate(result.pages, start=1):
+                record = CrawlPageRecord(
+                    crawl_run_id=run_id,
+                    sequence_number=sequence_number,
+                    url=page.url,
+                    depth=page.depth,
+                    outcome=page.outcome.value,
+                    message=page.message,
+                    http_status=page.http_status,
+                )
+                session.add(record)
+                session.flush()
+                if page.outcome is PageOutcome.HTML:
+                    if page.page_data is None:
+                        raise ValueError(
+                            "Успешная HTML-страница не содержит извлечённых данных."
+                        )
+                    if record.id is None:
+                        raise LookupError("Запись страницы не получила идентификатор.")
+                    data = page.page_data
+                    session.add(
+                        CrawlPageSnapshot(
+                            crawl_page_record_id=record.id,
+                            checked_at=data.checked_at,
+                            title=data.title,
+                            description=data.description,
+                            h1=data.h1,
+                            normalized_text=data.normalized_text,
+                            content_hash=data.content_hash,
+                            internal_links_json=_encode_internal_links(
+                                data.internal_links
+                            ),
+                        )
+                    )
         session.commit()
-        session.refresh(run)
         return run
 
 
@@ -313,3 +346,9 @@ def _stored_status(result: CrawlResult) -> str:
     if result.counters.errors:
         return PARTIAL_STATUS
     return COMPLETED_STATUS
+
+
+def _encode_internal_links(links: tuple[str, ...]) -> str:
+    """Канонически кодировать упорядоченные ссылки переносимым JSON-текстом."""
+
+    return json.dumps(links, ensure_ascii=False, separators=(",", ":"))

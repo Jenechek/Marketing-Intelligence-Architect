@@ -2,7 +2,30 @@
 
 from datetime import UTC, datetime
 
+from sqlalchemy import Column, DateTime, Text
+from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
+
+
+class UTCDateTime(TypeDecorator[datetime]):
+    """Переносимо сохранять timezone-aware datetime и возвращать его в UTC."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError("Время снимка должно содержать часовой пояс.")
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: datetime | None, dialect) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
 
 
 class Site(SQLModel, table=True):
@@ -61,3 +84,21 @@ class CrawlPageRecord(SQLModel, table=True):
     outcome: str = Field(index=True)
     message: str
     http_status: int | None = None
+
+
+class CrawlPageSnapshot(SQLModel, table=True):
+    """Сохранённое содержимое одной успешно разобранной HTML-страницы."""
+
+    crawl_page_record_id: int = Field(
+        foreign_key="crawlpagerecord.id",
+        primary_key=True,
+    )
+    checked_at: datetime = Field(
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+    title: str | None = None
+    description: str | None = None
+    h1: str | None = None
+    normalized_text: str = Field(sa_column=Column(Text, nullable=False))
+    content_hash: str
+    internal_links_json: str = Field(sa_column=Column(Text, nullable=False))

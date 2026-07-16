@@ -20,7 +20,8 @@ from marketing_intelligence.crawler import (
     PageOutcome,
 )
 from marketing_intelligence.main import create_app
-from marketing_intelligence.models import CrawlPageRecord, CrawlRun, Site
+from marketing_intelligence.models import CrawlPageRecord, CrawlPageSnapshot, CrawlRun, Site
+from marketing_intelligence.page_content import extract_page_data
 
 
 def build_app(tmp_path: Path, crawler=None):
@@ -90,6 +91,7 @@ class BlockingCrawler:
             PageOutcome.HTML,
             "Страница обработана.",
             200,
+            page_data=extract_page_data("<p>Страница</p>", ()),
         )
         return CrawlResult(
             CrawlStatus.COMPLETED,
@@ -121,6 +123,7 @@ def test_background_progress_completion_and_ui_availability(tmp_path: Path) -> N
         progress = client.get("/crawl-runs/1")
         with Session(app.state.engine) as session:
             page_records_while_running = session.exec(select(CrawlPageRecord)).all()
+            snapshots_while_running = session.exec(select(CrawlPageSnapshot)).all()
 
         assert home.status_code == 200
         assert "Добавленные сайты" in home.text
@@ -129,6 +132,7 @@ def test_background_progress_completion_and_ui_availability(tmp_path: Path) -> N
         assert "1</strong> / 200 страниц обработано" in progress.text
         assert "Запрошено</dt><dd>1" in progress.text
         assert page_records_while_running == []
+        assert snapshots_while_running == []
         assert crawler.settings == CrawlSettings()
         assert saved_runs(app)[0].max_pages == 200
 
@@ -145,6 +149,7 @@ def test_background_progress_completion_and_ui_availability(tmp_path: Path) -> N
         assert "Журнал ошибок" not in completed.text
         with Session(app.state.engine) as session:
             assert len(session.exec(select(CrawlPageRecord)).all()) == 1
+            assert len(session.exec(select(CrawlPageSnapshot)).all()) == 1
 
 
 def test_completed_run_shows_only_ordered_saved_errors_after_restart(
@@ -677,6 +682,18 @@ def test_real_loopback_crawl_finishes_through_server_ui(tmp_path: Path) -> None:
     assert "LoopbackSettingsBot/1.0" in result.text
     assert requests == ["/robots.txt", "/"]
     assert user_agents == ["LoopbackSettingsBot/1.0", "LoopbackSettingsBot/1.0"]
+    app.state.engine.dispose()
+    reopened = build_app(tmp_path)
+    with TestClient(reopened):
+        with Session(reopened.state.engine) as session:
+            snapshot = session.exec(select(CrawlPageSnapshot)).one()
+            record = session.get(CrawlPageRecord, snapshot.crawl_page_record_id)
+    assert record is not None
+    assert record.url == f"http://127.0.0.1:{server.server_port}/"
+    assert record.http_status == 200
+    assert snapshot.internal_links_json == (
+        f'["http://127.0.0.1:{server.server_port}/not-requested"]'
+    )
 
 
 def test_real_loopback_partial_crawl_shows_http_error_journal(tmp_path: Path) -> None:
@@ -742,3 +759,14 @@ def test_real_loopback_partial_crawl_shows_http_error_journal(tmp_path: Path) ->
     assert "HTTP-код</dt><dd>503" in result.text
     assert "Страница вернула ответ, который нельзя считать успешным." in result.text
     assert requests == ["/robots.txt", "/", "/error"]
+    app.state.engine.dispose()
+    reopened = build_app(tmp_path)
+    with TestClient(reopened):
+        with Session(reopened.state.engine) as session:
+            snapshots = session.exec(select(CrawlPageSnapshot)).all()
+            errors = session.exec(
+                select(CrawlPageRecord).where(CrawlPageRecord.outcome == "http_error")
+            ).all()
+    assert len(snapshots) == 1
+    assert len(errors) == 1
+    assert errors[0].http_status == 503

@@ -6,7 +6,13 @@ from sqlalchemy import delete, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from .models import AvailabilityCheck, CrawlPageRecord, CrawlRun, Site
+from .models import (
+    AvailabilityCheck,
+    CrawlPageRecord,
+    CrawlPageSnapshot,
+    CrawlRun,
+    Site,
+)
 
 
 class ActiveSiteCrawlError(RuntimeError):
@@ -115,6 +121,14 @@ def delete_site(engine: Engine, site_id: int) -> bool:
             delete(AvailabilityCheck).where(AvailabilityCheck.site_id == site_id)
         )
         run_ids = select(CrawlRun.id).where(CrawlRun.site_id == site_id)
+        page_ids = select(CrawlPageRecord.id).where(
+            CrawlPageRecord.crawl_run_id.in_(run_ids)
+        )
+        session.exec(
+            delete(CrawlPageSnapshot).where(
+                CrawlPageSnapshot.crawl_page_record_id.in_(page_ids)
+            )
+        )
         session.exec(
             delete(CrawlPageRecord).where(CrawlPageRecord.crawl_run_id.in_(run_ids))
         )
