@@ -1,12 +1,14 @@
 import tracemalloc
 from dataclasses import FrozenInstanceError
 from fractions import Fraction
+from itertools import product
 
 import pytest
 
 from marketing_intelligence.snapshot_metadata_comparison import ChangeImportance
 from marketing_intelligence.snapshot_text_comparison import (
     MatchedPageText,
+    _levenshtein_distance,
     compare_matched_page_text,
 )
 
@@ -19,6 +21,41 @@ def page(previous: str, current: str) -> MatchedPageText:
         previous_normalized_text=previous,
         current_normalized_text=current,
     )
+
+
+def reference_levenshtein_distance(previous: str, current: str) -> int:
+    """Простая построчная DP служит независимым эталоном только в тестах."""
+
+    previous_row = list(range(len(previous) + 1))
+    for current_index, current_character in enumerate(current, start=1):
+        current_row = [current_index]
+        for previous_index, previous_character in enumerate(previous, start=1):
+            current_row.append(
+                min(
+                    current_row[-1] + 1,
+                    previous_row[previous_index] + 1,
+                    previous_row[previous_index - 1]
+                    + (previous_character != current_character),
+                )
+            )
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def test_bit_parallel_core_matches_reference_dp_exhaustively() -> None:
+    alphabet = "aя🦔"
+    strings = [""]
+    for length in range(1, 5):
+        strings.extend(
+            "".join(characters)
+            for characters in product(alphabet, repeat=length)
+        )
+
+    for previous in strings:
+        for current in strings:
+            assert _levenshtein_distance(previous, current) == (
+                reference_levenshtein_distance(previous, current)
+            ), (previous, current)
 
 
 @pytest.mark.parametrize(
@@ -120,8 +157,8 @@ def test_result_contains_identity_and_is_immutable() -> None:
         result.weight = 1  # type: ignore[misc]
 
 
-def test_memory_depends_on_shorter_text() -> None:
-    matched_page = page("a" * 50_000, "b" * 32)
+def test_long_fully_different_texts_use_bounded_memory() -> None:
+    matched_page = page("a" * 50_000, "b" * 50_000)
 
     tracemalloc.start()
     try:
@@ -132,4 +169,4 @@ def test_memory_depends_on_shorter_text() -> None:
 
     assert result is not None
     assert result.distance == 50_000
-    assert peak_bytes < 100_000
+    assert peak_bytes < 150_000

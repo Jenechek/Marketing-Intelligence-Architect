@@ -31,7 +31,7 @@ class TextChange:
 
 
 def _levenshtein_distance(previous: str, current: str) -> int:
-    """Вернуть точное расстояние, используя память по меньшей строке."""
+    """Вернуть точное расстояние бит-параллельным алгоритмом Майерса."""
 
     if previous == current:
         return 0
@@ -71,22 +71,39 @@ def _levenshtein_distance(previous: str, current: str) -> int:
         previous_start, current_start = current_start, previous_start
         previous_length, current_length = current_length, previous_length
 
-    previous_row = list(range(previous_length + 1))
-    for current_index in range(1, current_length + 1):
-        current_character = current[current_start + current_index - 1]
-        current_row = [current_index]
-        for previous_index in range(1, previous_length + 1):
-            previous_character = previous[previous_start + previous_index - 1]
-            current_row.append(
-                min(
-                    current_row[-1] + 1,
-                    previous_row[previous_index] + 1,
-                    previous_row[previous_index - 1]
-                    + (previous_character != current_character),
-                )
-            )
-        previous_row = current_row
-    return previous_row[-1]
+    character_masks: dict[str, int] = {}
+    bit = 1
+    for index in range(previous_start, previous_start + previous_length):
+        character = previous[index]
+        character_masks[character] = character_masks.get(character, 0) | bit
+        bit <<= 1
+
+    full_mask = (1 << previous_length) - 1
+    highest_bit = 1 << (previous_length - 1)
+    positive = full_mask
+    negative = 0
+    distance = previous_length
+
+    for index in range(current_start, current_start + current_length):
+        character_mask = character_masks.get(current[index], 0)
+        matches = character_mask | negative
+        differences = (((matches & positive) + positive) ^ positive) | matches
+        horizontal_positive = negative | ~(differences | positive)
+        horizontal_negative = differences & positive
+
+        if horizontal_positive & highest_bit:
+            distance += 1
+        elif horizontal_negative & highest_bit:
+            distance -= 1
+
+        horizontal_positive = ((horizontal_positive << 1) | 1) & full_mask
+        horizontal_negative = (horizontal_negative << 1) & full_mask
+        positive = (
+            horizontal_negative | ~(differences | horizontal_positive)
+        ) & full_mask
+        negative = horizontal_positive & differences
+
+    return distance
 
 
 def _classify_change(change_ratio: Fraction) -> tuple[ChangeImportance, int]:
