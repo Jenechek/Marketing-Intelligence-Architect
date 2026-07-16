@@ -295,3 +295,19 @@ def test_page_price_is_frozen_and_page_without_schema_has_empty_tuple() -> None:
     assert data.prices == ()
     with pytest.raises(FrozenInstanceError):
         price.amount = Decimal("2")  # type: ignore[misc]
+
+
+def test_excessively_nested_json_ld_is_ignored_without_partial_prices() -> None:
+    nested = '{"next":' * 2000 + "null" + "}" * 2000
+    html = (
+        "<title>Рабочая страница</title><p>Основной текст</p>"
+        '<script type="application/ld+json">'
+        '[{"@type":"Offer","price":"10","priceCurrency":"RUB"},'
+        f"{nested}]</script>"
+    )
+
+    data = extract_page_data(html, ())
+
+    assert data.prices == ()
+    assert data.title == "Рабочая страница"
+    assert data.normalized_text == "основной текст"

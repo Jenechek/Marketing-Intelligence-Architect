@@ -114,9 +114,11 @@ def _extract_prices(soup: BeautifulSoup) -> tuple[PagePrice, ...]:
                 parse_float=Decimal,
                 parse_constant=lambda _: None,
             )
-        except (TypeError, ValueError, json.JSONDecodeError):
+            script_prices: list[PagePrice] = []
+            _walk_json_ld(payload, script_prices)
+        except (TypeError, ValueError, json.JSONDecodeError, RecursionError):
             continue
-        _walk_json_ld(payload, prices)
+        prices.extend(script_prices)
 
     _extract_microdata(soup, prices)
 
