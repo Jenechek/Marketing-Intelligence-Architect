@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from fractions import Fraction
 
-from marketing_intelligence.snapshot_metadata_comparison import ChangeImportance
+from .change_importance import ChangeImportance, classify_change_ratio
 
 
 @dataclass(frozen=True)
@@ -106,14 +106,6 @@ def _levenshtein_distance(previous: str, current: str) -> int:
     return distance
 
 
-def _classify_change(change_ratio: Fraction) -> tuple[ChangeImportance, int]:
-    if change_ratio < Fraction(1, 10):
-        return ChangeImportance.LOW, 1
-    if change_ratio < Fraction(3, 10):
-        return ChangeImportance.MEDIUM, 2
-    return ChangeImportance.HIGH, 3
-
-
 def compare_matched_page_text(page: MatchedPageText) -> TextChange | None:
     """Вернуть точное изменение уже нормализованного текста или ``None``."""
 
@@ -131,7 +123,7 @@ def compare_matched_page_text(page: MatchedPageText) -> TextChange | None:
             len(page.current_normalized_text),
         ),
     )
-    importance, weight = _classify_change(change_ratio)
+    importance, weight = classify_change_ratio(change_ratio)
     return TextChange(
         url=page.url,
         previous_page_id=page.previous_page_id,
