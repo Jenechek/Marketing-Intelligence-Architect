@@ -21,6 +21,13 @@ from .check_history import (
     start_check,
     to_local_datetime,
 )
+from .change_event_detail import ChangeEventDataError, load_change_event
+from .change_event_presentation import (
+    event_type_title,
+    importance_title,
+    present_sides,
+)
+from .change_event_query import load_change_events
 from .confirmation import (
     CHECK_AVAILABILITY_ACTION,
     START_CRAWL_ACTION,
@@ -182,6 +189,25 @@ def create_app(
             status_code=404,
         )
 
+    def render_change_event_error(
+        request: Request,
+        site_id: int,
+        *,
+        title: str,
+        message: str,
+        status_code: int,
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="change_event_error.html",
+            context={
+                "title": title,
+                "message": message,
+                "return_url": f"/sites/{site_id}/changes",
+            },
+            status_code=status_code,
+        )
+
     def render_delete_forbidden(request: Request, site: Site) -> HTMLResponse:
         return templates.TemplateResponse(
             request=request,
@@ -299,6 +325,102 @@ def create_app(
         if site is None:
             return render_site_not_found(request)
         return render_edit_site(request, site)
+
+    @application.get("/sites/{site_id}/changes", response_class=HTMLResponse)
+    async def change_events_screen(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        try:
+            event_page = load_change_events(
+                request.app.state.engine,
+                site_id=site_id,
+            )
+        except ValueError as error:
+            request.app.state.logger.error(
+                "Повреждён список событий сайта %s: %s",
+                site_id,
+                error,
+            )
+            return render_change_event_error(
+                request,
+                site_id,
+                title="События нельзя показать",
+                message=(
+                    "Часть сохранённых данных повреждена. "
+                    "Сохранённая история не изменена."
+                ),
+                status_code=500,
+            )
+        return templates.TemplateResponse(
+            request=request,
+            name="change_events.html",
+            context={
+                "site": site,
+                "event_page": event_page,
+                "event_type_title": event_type_title,
+                "importance_title": importance_title,
+                "to_local_datetime": to_local_datetime,
+            },
+        )
+
+    @application.get(
+        "/sites/{site_id}/changes/{event_id}",
+        response_class=HTMLResponse,
+    )
+    async def change_event_screen(
+        request: Request,
+        site_id: int,
+        event_id: int,
+    ) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        try:
+            detail = load_change_event(
+                request.app.state.engine,
+                site_id=site_id,
+                event_id=event_id,
+            )
+        except ChangeEventDataError as error:
+            request.app.state.logger.error(
+                "Повреждены данные события %s сайта %s: %s",
+                event_id,
+                site_id,
+                error,
+            )
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Событие нельзя показать",
+                message=(
+                    "Связанные данные события повреждены. "
+                    "Сохранённая история не изменена."
+                ),
+                status_code=500,
+            )
+        if detail is None:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Событие не найдено",
+                message="В этом сайте такого события нет.",
+                status_code=404,
+            )
+        current_side, previous_side = present_sides(detail)
+        return templates.TemplateResponse(
+            request=request,
+            name="change_event_detail.html",
+            context={
+                "site": site,
+                "detail": detail,
+                "current_side": current_side,
+                "previous_side": previous_side,
+                "event_type_title": event_type_title,
+                "importance_title": importance_title,
+                "to_local_datetime": to_local_datetime,
+            },
+        )
 
     @application.post("/sites/{site_id}/edit", response_class=HTMLResponse)
     async def save_site(request: Request, site_id: int) -> HTMLResponse:

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Изменения — {{ site.name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Изменения сайта</p>
+                <h1>{{ site.name }}</h1>
+                <p class="lead break-text">{{ site.url }}</p>
+            </div>
+            <a class="secondary-action" href="/">К списку сайтов</a>
+        </header>
+
+        <section class="content-card" aria-labelledby="events-title">
+            <div class="section-heading">
+                <h2 id="events-title">События</h2>
+                <span class="count">{{ event_page.total_count }}</span>
+            </div>
+            {% if event_page.items %}
+            <ol class="event-list">
+                {% for event in event_page.items %}
+                <li>
+                    <div>
+                        <strong>{{ event_type_title(event.event_type) }}</strong>
+                        <p class="event-meta">
+                            Важность: {{ importance_title(event.importance) }} ·
+                            {{ to_local_datetime(event.current_completed_at) }}
+                        </p>
+                        <p class="break-text">{{ event.url }}</p>
+                    </div>
+                    <a class="secondary-action"
+                       href="/sites/{{ site.id }}/changes/{{ event.event_id }}">Подробнее</a>
+                </li>
+                {% endfor %}
+            </ol>
+            {% else %}
+            <div class="empty-state">
+                <h3>Изменений пока нет</h3>
+                <p>После двух завершённых обходов обнаруженные изменения появятся здесь.</p>
+            </div>
+            {% endif %}
+        </section>
+    </main>
+</body>
+</html>

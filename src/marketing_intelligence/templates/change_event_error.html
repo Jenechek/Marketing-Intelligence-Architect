@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Событие недоступно — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <section class="content-card" role="alert" aria-labelledby="event-error-title">
+            <p class="eyebrow">Изменения сайта</p>
+            <h1 id="event-error-title">{{ title }}</h1>
+            <p class="lead">{{ message }}</p>
+            <a class="secondary-action" href="{{ return_url }}">Вернуться к событиям</a>
+        </section>
+    </main>
+</body>
+</html>
