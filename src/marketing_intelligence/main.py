@@ -289,7 +289,8 @@ def create_app(
             raise
         except Exception:
             application.state.logger.exception(
-                "Фоновый обход завершился ошибкой (run_id=%s)", run_id
+                "Фоновая обработка запуска обхода завершилась ошибкой (run_id=%s)",
+                run_id,
             )
 
     @application.get("/sites/{site_id}/edit", response_class=HTMLResponse)
