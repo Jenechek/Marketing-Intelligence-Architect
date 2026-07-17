@@ -3,8 +3,9 @@
 from datetime import UTC, datetime
 
 from decimal import Decimal
+from fractions import Fraction
 
-from sqlalchemy import Column, DateTime, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, DateTime, Text, UniqueConstraint
 from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
@@ -135,3 +136,83 @@ class CrawlPagePriceRecord(SQLModel, table=True):
         """Восстановить точную сумму из проверенного канонического текста."""
 
         return decode_decimal_text(self.amount_text)
+
+
+class SnapshotChangeEvent(SQLModel, table=True):
+    """Отдельное обнаруженное изменение между двумя завершёнными снимками."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "current_run_id",
+            "previous_run_id",
+            "event_type",
+            "url",
+            name="uq_snapshot_change_event_pair_type_url",
+        ),
+        CheckConstraint(
+            "event_type IN ('page_added', 'page_removed', 'title_changed', "
+            "'description_changed', 'h1_changed', 'text_changed', "
+            "'internal_links_changed')",
+            name="ck_snapshot_change_event_type",
+        ),
+        CheckConstraint(
+            "importance IN ('low', 'medium', 'high')",
+            name="ck_snapshot_change_event_importance",
+        ),
+        CheckConstraint(
+            "weight >= 1 AND weight <= 3",
+            name="ck_snapshot_change_event_weight",
+        ),
+        CheckConstraint(
+            "(change_ratio_numerator IS NULL AND "
+            "change_ratio_denominator IS NULL) OR "
+            "(change_ratio_numerator >= 0 AND "
+            "change_ratio_denominator > 0)",
+            name="ck_snapshot_change_event_ratio",
+        ),
+        CheckConstraint(
+            "text_distance IS NULL OR text_distance >= 0",
+            name="ck_snapshot_change_event_distance",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    current_run_id: int = Field(foreign_key="crawlrun.id", index=True)
+    previous_run_id: int | None = Field(
+        default=None,
+        foreign_key="crawlrun.id",
+        index=True,
+    )
+    current_page_record_id: int | None = Field(
+        default=None,
+        foreign_key="crawlpagerecord.id",
+        index=True,
+    )
+    previous_page_record_id: int | None = Field(
+        default=None,
+        foreign_key="crawlpagerecord.id",
+        index=True,
+    )
+    event_type: str = Field(index=True)
+    url: str = Field(index=True)
+    current_completed_at: datetime = Field(
+        sa_column=Column(UTCDateTime(), nullable=False, index=True),
+    )
+    importance: str = Field(index=True)
+    weight: int = Field(index=True)
+    text_distance: int | None = None
+    change_ratio_numerator: int | None = None
+    change_ratio_denominator: int | None = None
+
+    @property
+    def change_ratio(self) -> Fraction | None:
+        """Восстановить точную долю изменения, если она применима."""
+
+        if self.change_ratio_numerator is None:
+            return None
+        if self.change_ratio_denominator is None:
+            raise ValueError("Знаменатель точной доли изменения отсутствует.")
+        return Fraction(
+            self.change_ratio_numerator,
+            self.change_ratio_denominator,
+        )

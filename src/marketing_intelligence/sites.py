@@ -2,7 +2,7 @@
 
 from urllib.parse import urlsplit
 
-from sqlalchemy import delete, text
+from sqlalchemy import delete, or_, text
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
@@ -13,6 +13,7 @@ from .models import (
     CrawlPageSnapshot,
     CrawlRun,
     Site,
+    SnapshotChangeEvent,
 )
 
 
@@ -124,6 +125,14 @@ def delete_site(engine: Engine, site_id: int) -> bool:
         run_ids = select(CrawlRun.id).where(CrawlRun.site_id == site_id)
         page_ids = select(CrawlPageRecord.id).where(
             CrawlPageRecord.crawl_run_id.in_(run_ids)
+        )
+        session.exec(
+            delete(SnapshotChangeEvent).where(
+                or_(
+                    SnapshotChangeEvent.current_run_id.in_(run_ids),
+                    SnapshotChangeEvent.previous_run_id.in_(run_ids),
+                )
+            )
         )
         session.exec(
             delete(CrawlPagePriceRecord).where(
