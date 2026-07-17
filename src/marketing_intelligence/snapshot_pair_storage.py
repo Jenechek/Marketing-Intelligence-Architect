@@ -1,7 +1,6 @@
 """Read-only адаптеры загрузки пары завершённых снимков из хранилища."""
 
 import json
-from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
@@ -10,6 +9,11 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
 from .models import CrawlPageRecord, CrawlPageSnapshot, CrawlRun
+from .snapshot_comparison_input import (
+    CompletedSnapshotComparisonInput,
+    MatchedSnapshotPageVersions,
+    SnapshotPageVersion,
+)
 from .snapshot_page_matching import (
     CompletedSnapshotPair,
     SnapshotPageReference,
@@ -18,47 +22,6 @@ from .snapshot_page_matching import (
 
 
 COMPLETED_STATUS = "completed"
-
-
-@dataclass(frozen=True)
-class SnapshotPageVersion:
-    """Полное неизменяемое содержимое сохранённой версии страницы."""
-
-    identifier: int
-    url: str
-    checked_at: datetime
-    title: str | None
-    description: str | None
-    h1: str | None
-    normalized_text: str
-    content_hash: str
-    internal_links: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class MatchedSnapshotPageVersions:
-    """Старая и новая версии страницы с одинаковым URL."""
-
-    previous: SnapshotPageVersion
-    current: SnapshotPageVersion
-
-    @property
-    def url(self) -> str:
-        return self.current.url
-
-
-@dataclass(frozen=True)
-class CompletedSnapshotComparisonInput:
-    """Полная сохранённая пара снимков для будущего сравнения."""
-
-    current_run_id: int
-    previous_run_id: int | None
-    current_completed_at: datetime
-    creates_baseline: bool
-    new_pages: tuple[SnapshotPageReference, ...]
-    removed_pages: tuple[SnapshotPageReference, ...]
-    matched_pages: tuple[MatchedSnapshotPageVersions, ...]
-
 
 class CrawlRunNotFoundError(LookupError):
     """Запрошенный запуск обхода отсутствует."""
