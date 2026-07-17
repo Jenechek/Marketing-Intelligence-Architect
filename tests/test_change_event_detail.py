@@ -543,12 +543,22 @@ def test_global_feed_distinguishes_no_sites_empty_history_and_no_matches(
     app = create_app(settings)
     with TestClient(app) as client:
         no_sites = client.get("/changes")
+        invalid_without_sites = client.get(
+            "/changes?event_type=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+        )
         client.post(
             "/sites",
             data={"name": "Пустой", "url": "https://empty.test"},
         )
         no_history = client.get("/changes")
     assert "Сайтов пока нет" in no_sites.text
+    assert invalid_without_sites.status_code == 422
+    assert "Сайтов пока нет" in invalid_without_sites.text
+    assert (
+        "Выберите один из доступных типов события"
+        in invalid_without_sites.text
+    )
+    assert "<script>alert(1)</script>" not in invalid_without_sites.text
     assert "Общей истории ещё нет" in no_history.text
 
 

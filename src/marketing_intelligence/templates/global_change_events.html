@@ -17,6 +17,14 @@
             <a class="secondary-action" href="/">К списку сайтов</a>
         </header>
 
+        {% if errors %}
+        <div class="notice error" role="alert">
+            <strong>Проверьте параметры фильтров.</strong>
+            <ul>{% for message in errors.values() %}<li>{{ message }}</li>{% endfor %}</ul>
+            {% if errors.page %}<p>Получено: {{ form.page }}</p>{% endif %}
+        </div>
+        {% endif %}
+
         {% if not sites %}
         <section class="content-card empty-state" aria-labelledby="no-sites-title">
             <h2 id="no-sites-title">Сайтов пока нет</h2>
@@ -26,13 +34,6 @@
         {% else %}
         <section class="content-card" aria-labelledby="filters-title">
             <h2 id="filters-title">Фильтры</h2>
-            {% if errors %}
-            <div class="notice error" role="alert">
-                <strong>Проверьте параметры фильтров.</strong>
-                <ul>{% for message in errors.values() %}<li>{{ message }}</li>{% endfor %}</ul>
-                {% if errors.page %}<p>Получено: {{ form.page }}</p>{% endif %}
-            </div>
-            {% endif %}
             <form class="filter-form" method="get" action="/changes">
                 <div class="field">
                     <label for="site_id">Сайт</label>
