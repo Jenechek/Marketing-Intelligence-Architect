@@ -178,9 +178,9 @@ class SnapshotChangeEvent(SQLModel, table=True):
 
     id: int | None = Field(default=None, primary_key=True)
     current_run_id: int = Field(foreign_key="crawlrun.id", index=True)
-    previous_run_id: int | None = Field(
-        default=None,
+    previous_run_id: int = Field(
         foreign_key="crawlrun.id",
+        nullable=False,
         index=True,
     )
     current_page_record_id: int | None = Field(

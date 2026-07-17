@@ -441,6 +441,60 @@ def test_model_has_portable_unique_pair_type_url_and_foreign_keys() -> None:
     ).target_fullname == "crawlpagerecord.id"
 
 
+def test_previous_run_is_required_by_the_database(engine) -> None:
+    assert SnapshotChangeEvent.__table__.c.previous_run_id.nullable is False
+
+    with Session(engine) as session:
+        site = Site(name="Required", url="https://required.example")
+        session.add(site)
+        session.flush()
+        assert site.id is not None
+        current_run_id = add_run(session, site.id, UTC_COMPLETED_AT)
+        event = SnapshotChangeEvent(
+            current_run_id=current_run_id,
+            event_type=ChangeEventType.PAGE_ADDED.value,
+            url="https://required.example/new",
+            current_completed_at=UTC_COMPLETED_AT,
+            importance=ChangeImportance.MEDIUM.value,
+            weight=2,
+        )
+        session.add(event)
+
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+
+def test_database_rejects_duplicate_event_for_the_same_valid_run_pair(engine) -> None:
+    with Session(engine) as session:
+        site = Site(name="Unique", url="https://unique.example")
+        session.add(site)
+        session.flush()
+        assert site.id is not None
+        previous_run_id = add_run(
+            session,
+            site.id,
+            UTC_COMPLETED_AT - timedelta(hours=1),
+        )
+        current_run_id = add_run(session, site.id, UTC_COMPLETED_AT)
+        common = {
+            "current_run_id": current_run_id,
+            "previous_run_id": previous_run_id,
+            "event_type": ChangeEventType.PAGE_ADDED.value,
+            "url": "https://unique.example/new",
+            "current_completed_at": UTC_COMPLETED_AT,
+            "importance": ChangeImportance.MEDIUM.value,
+            "weight": 2,
+        }
+        session.add_all(
+            [SnapshotChangeEvent(**common), SnapshotChangeEvent(**common)]
+        )
+
+        with pytest.raises(IntegrityError):
+            session.commit()
+
+    assert load_events(engine) == []
+
+
 def test_persistence_module_contains_no_sqlite_specific_sql() -> None:
     import marketing_intelligence.change_event_persistence as module
 
