@@ -15,6 +15,9 @@ from marketing_intelligence.crawl_history import (
     run_crawl,
     start_crawl_run,
 )
+from marketing_intelligence.completed_crawl_processing import (
+    process_completed_crawl_run,
+)
 from marketing_intelligence.crawler import (
     CrawlCounters,
     CrawlPageResult,
@@ -30,6 +33,7 @@ from marketing_intelligence.models import (
     CrawlPageSnapshot,
     CrawlRun,
     Site,
+    SnapshotChangeEvent,
 )
 from marketing_intelligence.page_content import PageData, PagePrice
 from marketing_intelligence.price_persistence import (
@@ -559,6 +563,231 @@ def test_partial_saves_success_snapshot_and_error_without_replacing_previous_run
     assert [price.amount_text for price in stored_prices] == ["100", "200"]
 
 
+def test_completed_runs_automatically_create_exact_events_and_are_idempotent(
+    tmp_path: Path,
+) -> None:
+    engine = initialized_engine(tmp_path)
+    url = "https://example.com/"
+    first = asyncio.run(
+        run_crawl(
+            engine,
+            1,
+            url,
+            crawler=ResultCrawler(
+                engine,
+                result_with(
+                    pages=(
+                        CrawlPageResult(
+                            url,
+                            0,
+                            PageOutcome.HTML,
+                            "HTML обработан",
+                            200,
+                            page_data=page_data(
+                                "старый текст",
+                                title="Старый Title",
+                                description="Старое описание",
+                                h1="Старый H1",
+                                links=("https://example.com/old",),
+                            ),
+                        ),
+                    ),
+                    counters=CrawlCounters(processed=1, requested=1, successful=1),
+                ),
+            ),
+        )
+    )
+
+    with Session(engine) as session:
+        assert session.exec(select(SnapshotChangeEvent)).all() == []
+    assert process_completed_crawl_run(engine, first.id) == 0
+
+    second = asyncio.run(
+        run_crawl(
+            engine,
+            1,
+            url,
+            crawler=ResultCrawler(
+                engine,
+                result_with(
+                    pages=(
+                        CrawlPageResult(
+                            url,
+                            0,
+                            PageOutcome.HTML,
+                            "HTML обработан",
+                            200,
+                            page_data=page_data(
+                                "новый текст",
+                                title="Новый Title",
+                                description="Новое описание",
+                                h1="Новый H1",
+                                links=("https://example.com/new",),
+                            ),
+                        ),
+                    ),
+                    counters=CrawlCounters(processed=1, requested=1, successful=1),
+                ),
+            ),
+        )
+    )
+
+    with Session(engine) as session:
+        events = list(
+            session.exec(
+                select(SnapshotChangeEvent).order_by(SnapshotChangeEvent.event_type)
+            )
+        )
+    assert {event.event_type for event in events} == {
+        "title_changed",
+        "description_changed",
+        "h1_changed",
+        "text_changed",
+        "internal_links_changed",
+    }
+    assert all(event.current_run_id == second.id for event in events)
+    assert all(event.previous_run_id == first.id for event in events)
+    assert process_completed_crawl_run(engine, second.id) == 0
+    with Session(engine) as session:
+        assert len(session.exec(select(SnapshotChangeEvent)).all()) == 5
+
+
+def test_partial_between_completed_runs_is_not_processed_or_used_as_baseline(
+    tmp_path: Path,
+) -> None:
+    engine = initialized_engine(tmp_path)
+    url = "https://example.com/"
+
+    def completed_page(text: str) -> CrawlPageResult:
+        return CrawlPageResult(
+            url,
+            0,
+            PageOutcome.HTML,
+            "HTML обработан",
+            200,
+            page_data=page_data(text, title=text),
+        )
+
+    first = asyncio.run(
+        run_crawl(
+            engine,
+            1,
+            url,
+            crawler=ResultCrawler(
+                engine,
+                result_with(
+                    pages=(completed_page("первая версия"),),
+                    counters=CrawlCounters(processed=1, requested=1, successful=1),
+                ),
+            ),
+        )
+    )
+    partial = asyncio.run(
+        run_crawl(
+            engine,
+            1,
+            url,
+            crawler=ResultCrawler(
+                engine,
+                result_with(
+                    pages=(
+                        completed_page("частичная версия"),
+                        CrawlPageResult(
+                            "https://example.com/error",
+                            1,
+                            PageOutcome.HTTP_ERROR,
+                            "Ошибка страницы",
+                            503,
+                        ),
+                    ),
+                    counters=CrawlCounters(
+                        processed=2,
+                        requested=2,
+                        successful=1,
+                        errors=1,
+                    ),
+                ),
+            ),
+        )
+    )
+    second = asyncio.run(
+        run_crawl(
+            engine,
+            1,
+            url,
+            crawler=ResultCrawler(
+                engine,
+                result_with(
+                    pages=(completed_page("вторая версия"),),
+                    counters=CrawlCounters(processed=1, requested=1, successful=1),
+                ),
+            ),
+        )
+    )
+
+    with Session(engine) as session:
+        events = list(session.exec(select(SnapshotChangeEvent)))
+    assert partial.status == "partial"
+    assert events
+    assert all(event.current_run_id == second.id for event in events)
+    assert all(event.previous_run_id == first.id for event in events)
+    assert all(event.current_run_id != partial.id for event in events)
+
+
+def test_post_processing_error_preserves_completed_run_pages_and_snapshots(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = initialized_engine(tmp_path)
+    page = CrawlPageResult(
+        "https://example.com/",
+        0,
+        PageOutcome.HTML,
+        "HTML обработан",
+        200,
+        page_data=page_data("сохранённый текст"),
+    )
+
+    def fail_comparison(_comparison_input):
+        raise RuntimeError("сбой постобработки")
+
+    monkeypatch.setattr(
+        "marketing_intelligence.completed_crawl_processing."
+        "build_completed_snapshot_comparison",
+        fail_comparison,
+    )
+
+    with pytest.raises(RuntimeError, match="сбой постобработки"):
+        asyncio.run(
+            run_crawl(
+                engine,
+                1,
+                page.url,
+                crawler=ResultCrawler(
+                    engine,
+                    result_with(
+                        pages=(page,),
+                        counters=CrawlCounters(
+                            processed=1,
+                            requested=1,
+                            successful=1,
+                        ),
+                    ),
+                ),
+            )
+        )
+
+    with Session(engine) as session:
+        run = session.exec(select(CrawlRun)).one()
+        record = session.exec(select(CrawlPageRecord)).one()
+        snapshot = session.exec(select(CrawlPageSnapshot)).one()
+        events = session.exec(select(SnapshotChangeEvent)).all()
+    assert run.status == "completed"
+    assert record.url == page.url
+    assert snapshot.normalized_text == "сохранённый текст"
+    assert events == []
+
+
 def test_deferred_failed_and_interrupted_runs_publish_no_snapshots(tmp_path: Path) -> None:
     engine = initialized_engine(tmp_path)
     deferred_page = CrawlPageResult(
@@ -607,6 +836,7 @@ def test_deferred_failed_and_interrupted_runs_publish_no_snapshots(tmp_path: Pat
         records = list(session.exec(select(CrawlPageRecord)))
         snapshots = list(session.exec(select(CrawlPageSnapshot)))
         prices = list(session.exec(select(CrawlPagePriceRecord)))
+        events = list(session.exec(select(SnapshotChangeEvent)))
 
     assert deferred.status == "deferred"
     assert [run.status for run in runs] == ["deferred", "failed", "interrupted"]
@@ -614,6 +844,7 @@ def test_deferred_failed_and_interrupted_runs_publish_no_snapshots(tmp_path: Pat
     assert records == []
     assert snapshots == []
     assert prices == []
+    assert events == []
 
 
 def test_atomic_finalization_rolls_back_page_when_html_data_is_missing(

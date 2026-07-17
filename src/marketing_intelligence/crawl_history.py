@@ -7,6 +7,7 @@ from sqlalchemy import func, text, update
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
+from .completed_crawl_processing import process_completed_crawl_run
 from .crawler import (
     CrawlCounters,
     CrawlResult,
@@ -160,10 +161,14 @@ async def execute_crawl_run(
             active_settings,
             progress=save_progress,
         )
-        return _complete_crawl_run(engine, run_id, result)
+        completed_run = _complete_crawl_run(engine, run_id, result)
     except Exception as error:
         _fail_crawl_run(engine, run_id, error)
         raise
+
+    if completed_run.status == COMPLETED_STATUS:
+        process_completed_crawl_run(engine, run_id)
+    return completed_run
 
 
 def update_crawl_progress(
