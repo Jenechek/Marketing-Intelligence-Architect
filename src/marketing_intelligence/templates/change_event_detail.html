@@ -14,7 +14,7 @@
                 <h1>{{ event_type_title(detail.event_type) }}</h1>
                 <p class="lead break-text">{{ detail.url }}</p>
             </div>
-            <a class="secondary-action" href="/sites/{{ site.id }}/changes">К событиям</a>
+            <a class="secondary-action" href="{{ return_url }}">К событиям</a>
         </header>
 
         <section class="content-card" aria-labelledby="event-summary-title">

@@ -1,6 +1,7 @@
 """Настройки локального приложения."""
 
 from dataclasses import dataclass
+from datetime import tzinfo
 import os
 from pathlib import Path
 
@@ -12,6 +13,7 @@ class Settings:
     data_dir: Path
     logs_dir: Path
     database_url: str
+    local_timezone: tzinfo | None = None
 
     @classmethod
     def from_environment(cls) -> "Settings":

@@ -17,13 +17,60 @@
             <a class="secondary-action" href="/">К списку сайтов</a>
         </header>
 
+        <section class="content-card" aria-labelledby="filters-title">
+            <h2 id="filters-title">Фильтры</h2>
+            {% if errors %}
+            <div class="notice error" role="alert">
+                <strong>Проверьте параметры фильтров.</strong>
+                <ul>
+                    {% for message in errors.values() %}<li>{{ message }}</li>{% endfor %}
+                </ul>
+                {% if errors.page %}<p>Получено: {{ form.page }}</p>{% endif %}
+            </div>
+            {% endif %}
+            <form class="filter-form" method="get" action="/sites/{{ site.id }}/changes">
+                <div class="field">
+                    <label for="event_type">Тип события</label>
+                    <select id="event_type" name="event_type" {% if errors.event_type %}aria-invalid="true" aria-describedby="event-type-error"{% endif %}>
+                        <option value="">Все типы</option>
+                        {% if errors.event_type %}<option value="{{ form.event_type }}" selected disabled>{{ form.event_type }}</option>{% endif %}
+                        {% for item in event_types %}
+                        <option value="{{ item.value }}" {% if form.event_type == item.value %}selected{% endif %}>{{ event_type_title(item) }}</option>
+                        {% endfor %}
+                    </select>
+                    {% if errors.event_type %}<p class="field-error" id="event-type-error">{{ errors.event_type }}</p>{% endif %}
+                </div>
+                <div class="date-fields">
+                    <div class="field">
+                        <label for="date_from">Дата с</label>
+                        <input id="date_from" name="date_from" type="{{ 'text' if errors.date_from else 'date' }}" value="{{ form.date_from }}" {% if errors.date_from or errors.date_range %}aria-invalid="true"{% endif %}>
+                    </div>
+                    <div class="field">
+                        <label for="date_to">Дата по</label>
+                        <input id="date_to" name="date_to" type="{{ 'text' if errors.date_to else 'date' }}" value="{{ form.date_to }}" {% if errors.date_to or errors.date_range %}aria-invalid="true"{% endif %}>
+                    </div>
+                </div>
+                {% if errors.date_from %}<p class="field-error">{{ errors.date_from }}</p>{% endif %}
+                {% if errors.date_to %}<p class="field-error">{{ errors.date_to }}</p>{% endif %}
+                {% if errors.date_range %}<p class="field-error">{{ errors.date_range }}</p>{% endif %}
+                <div class="form-actions">
+                    <button class="primary-action" type="submit">Применить фильтры</button>
+                    <a class="secondary-action" href="/sites/{{ site.id }}/changes">Сбросить</a>
+                </div>
+            </form>
+        </section>
+
+        {% if event_page %}
         <section class="content-card" aria-labelledby="events-title">
             <div class="section-heading">
-                <h2 id="events-title">События</h2>
-                <span class="count">{{ event_page.total_count }}</span>
+                <div>
+                    <h2 id="events-title">События</h2>
+                    <p>Найдено: {{ event_page.total_count }}. Страница {{ current_page }} из {{ total_pages }}.</p>
+                </div>
+                <span class="count" aria-label="Найдено событий">{{ event_page.total_count }}</span>
             </div>
             {% if event_page.items %}
-            <ol class="event-list">
+            <ol class="event-list" start="{{ event_page.offset + 1 }}">
                 {% for event in event_page.items %}
                 <li>
                     <div>
@@ -34,18 +81,28 @@
                         </p>
                         <p class="break-text">{{ event.url }}</p>
                     </div>
-                    <a class="secondary-action"
-                       href="/sites/{{ site.id }}/changes/{{ event.event_id }}">Подробнее</a>
+                    <a class="secondary-action" href="{{ detail_url(event.event_id) }}">Подробнее</a>
                 </li>
                 {% endfor %}
             </ol>
+            <nav class="pagination" aria-label="Страницы событий">
+                {% if previous_url %}<a class="secondary-action" rel="prev" href="{{ previous_url }}">Назад</a>{% else %}<span></span>{% endif %}
+                <span aria-current="page">Страница {{ current_page }} из {{ total_pages }}</span>
+                {% if next_url %}<a class="secondary-action" rel="next" href="{{ next_url }}">Вперёд</a>{% else %}<span></span>{% endif %}
+            </nav>
+            {% elif has_any_history %}
+            <div class="empty-state">
+                <h3>По фильтрам ничего не найдено</h3>
+                <p>Измените параметры или сбросьте фильтры, чтобы увидеть историю.</p>
+            </div>
             {% else %}
             <div class="empty-state">
-                <h3>Изменений пока нет</h3>
+                <h3>Истории ещё нет</h3>
                 <p>После двух завершённых обходов обнаруженные изменения появятся здесь.</p>
             </div>
             {% endif %}
         </section>
+        {% endif %}
     </main>
 </body>
 </html>
