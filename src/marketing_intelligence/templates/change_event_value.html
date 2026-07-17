@@ -1,0 +1,15 @@
+{% if side.state.value == "absent_side" %}
+<p class="missing-value">Эта сторона страницы отсутствует.</p>
+{% elif side.state.value == "none" %}
+<p class="missing-value">Значение отсутствует (None).</p>
+{% elif side.state.value == "empty_text" %}
+<p class="missing-value">Пустая строка.</p>
+{% elif side.state.value == "empty_links" %}
+<p class="missing-value">Пустой набор внутренних ссылок.</p>
+{% elif side.state.value == "links" %}
+<ul class="value-links">
+    {% for link in side.links %}<li>{{ link }}</li>{% endfor %}
+</ul>
+{% else %}
+<div class="exact-value">{{ side.text }}</div>
+{% endif %}

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ event_type_title(detail.event_type) }} — {{ site.name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Подробности изменения</p>
+                <h1>{{ event_type_title(detail.event_type) }}</h1>
+                <p class="lead break-text">{{ detail.url }}</p>
+            </div>
+            <a class="secondary-action" href="/sites/{{ site.id }}/changes">К событиям</a>
+        </header>
+
+        <section class="content-card" aria-labelledby="event-summary-title">
+            <h2 id="event-summary-title">Событие</h2>
+            <dl class="summary-list">
+                <div><dt>Важность</dt><dd>{{ importance_title(detail.importance) }}</dd></div>
+                <div>
+                    <dt>Обнаружено</dt>
+                    <dd>{{ to_local_datetime(detail.current_completed_at) }}</dd>
+                </div>
+            </dl>
+        </section>
+
+        <section class="comparison" aria-label="Сравнение значений: Стало, затем Было">
+            <article class="value-panel current-value" aria-labelledby="current-value-title">
+                <h2 id="current-value-title">Стало</h2>
+                <p class="value-caption">Текущее значение</p>
+                {% with side=current_side %}{% include "change_event_value.html" %}{% endwith %}
+            </article>
+            <div class="comparison-divider" role="separator"
+                 aria-label="Разделитель текущего и предыдущего значений"></div>
+            <article class="value-panel previous-value" aria-labelledby="previous-value-title">
+                <h2 id="previous-value-title">Было</h2>
+                <p class="value-caption">Предыдущее значение</p>
+                {% with side=previous_side %}{% include "change_event_value.html" %}{% endwith %}
+            </article>
+        </section>
+    </main>
+</body>
+</html>
