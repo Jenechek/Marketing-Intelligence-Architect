@@ -406,6 +406,162 @@ def test_server_rendered_list_detail_order_escaping_focus_and_errors(
     assert "focus-visible" in styles
 
 
+def test_global_feed_filters_explanations_pagination_return_and_two_queries(
+    seeded_database,
+    tmp_path: Path,
+) -> None:
+    path, site_id, _, ids = seeded_database
+    engine = _engine(path)
+    with Session(engine) as session:
+        source = session.get(
+            SnapshotChangeEvent,
+            ids[ChangeEventType.PAGE_ADDED],
+        )
+        assert source is not None
+        for number in range(20):
+            url = f"https://example.test/global-{number}?unsafe=<tag>"
+            page_id = _page(session, source.current_run_id, url)
+            _event(
+                session,
+                source.previous_run_id,
+                source.current_run_id,
+                ChangeEventType.PAGE_ADDED,
+                url,
+                current_page=page_id,
+            )
+        session.commit()
+    engine.dispose()
+    before = sha256(path.read_bytes()).hexdigest()
+    app = create_app(
+        Settings(
+            data_dir=tmp_path / "data",
+            logs_dir=tmp_path / "logs",
+            database_url=f"sqlite:///{path.as_posix()}",
+            local_timezone=timezone(timedelta(hours=3)),
+        )
+    )
+    event_sql: list[str] = []
+    with TestClient(app) as client:
+        home = client.get("/")
+        first = client.get("/changes")
+
+        def record_sql(connection, cursor, statement, parameters, context, executemany):
+            if "snapshotchangeevent" in statement.lower():
+                event_sql.append(statement)
+
+        sqlalchemy_event.listen(app.state.engine, "before_cursor_execute", record_sql)
+        try:
+            second = client.get("/changes?page=2")
+        finally:
+            sqlalchemy_event.remove(app.state.engine, "before_cursor_execute", record_sql)
+
+        detail_match = re.search(
+            r'href="(/sites/\d+/changes/\d+\?scope=all&amp;page=2)"',
+            second.text,
+        )
+        assert detail_match is not None
+        detail = client.get(unescape(detail_match.group(1)))
+        filtered = client.get(
+            f"/changes?site_id={site_id}&event_type=title_changed"
+            "&date_from=2026-07-17&date_to=2026-07-17"
+        )
+        filtered_match = re.search(
+            r'href="([^"]+scope=all[^"]+)"', filtered.text
+        )
+        assert filtered_match is not None
+        filtered_detail = client.get(unescape(filtered_match.group(1)))
+        bad_site = client.get("/changes?site_id=%3Cscript%3E")
+        missing_site = client.get("/changes?site_id=999999")
+        bad_type = client.get("/changes?event_type=unknown")
+        bad_date = client.get("/changes?date_from=17.07.2026")
+        bad_page = client.get("/changes?page=0")
+        missing_page = client.get(
+            f"/changes?site_id={site_id}&event_type=title_changed&page=2"
+        )
+        no_matches = client.get("/changes?date_from=2030-01-01")
+        unsafe_return = client.get(
+            unescape(filtered_match.group(1))
+            + "&return_url=https://attacker.example/"
+        )
+        bad_scope = client.get(
+            f"/sites/{site_id}/changes/{ids[ChangeEventType.TITLE_CHANGED]}"
+            "?scope=https://attacker.example/"
+        )
+
+    combined = first.text + second.text
+    assert 'href="/changes">Все изменения</a>' in home.text
+    assert first.status_code == second.status_code == detail.status_code == 200
+    assert "Найдено: 28." in first.text
+    assert "Основной &lt;сайт&gt;" in combined and "Чужой" in combined
+    assert "https://other.test/new" in combined
+    assert "&lt;tag&gt;" in combined and "<tag>" not in combined
+    for explanation in (
+        "найдена страница, которой не было",
+        "была в предыдущем завершённом обходе",
+        "Значение Title страницы отличается",
+        "Значение Description страницы отличается",
+        "Значение H1 страницы отличается",
+        "Нормализованный текст страницы отличается",
+        "Набор внутренних ссылок страницы отличается",
+    ):
+        assert explanation in combined
+    assert len(event_sql) == 2
+    assert sum("count(" in statement.lower() for statement in event_sql) == 1
+    assert 'href="/changes?page=2">К событиям</a>' in detail.text
+    assert filtered.status_code == filtered_detail.status_code == 200
+    assert "Найдено: 1." in filtered.text
+    assert "2026-07-17 15:00:00+03:00" in filtered.text
+    assert (
+        f'href="/changes?site_id={site_id}&amp;event_type=title_changed'
+        '&amp;date_from=2026-07-17&amp;date_to=2026-07-17">К событиям</a>'
+    ) in filtered_detail.text
+    assert bad_site.status_code == bad_type.status_code == bad_date.status_code == 422
+    assert "&lt;script&gt;" in bad_site.text and "<script>" not in bad_site.text
+    assert missing_site.status_code == 404
+    assert "Выбранный сайт не существует" in missing_site.text
+    assert bad_page.status_code == 422
+    assert missing_page.status_code == 404
+    assert f'href="/changes?site_id={site_id}&amp;event_type=title_changed"' in missing_page.text
+    assert "По фильтрам ничего не найдено" in no_matches.text
+    assert "attacker.example" not in unsafe_return.text
+    assert bad_scope.status_code == 422
+    assert sha256(path.read_bytes()).hexdigest() == before
+
+
+def test_global_feed_distinguishes_no_sites_empty_history_and_no_matches(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "global-empty.db"
+    engine = _engine(path)
+    initialize_database(engine)
+    engine.dispose()
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        logs_dir=tmp_path / "logs",
+        database_url=f"sqlite:///{path.as_posix()}",
+    )
+    app = create_app(settings)
+    with TestClient(app) as client:
+        no_sites = client.get("/changes")
+        invalid_without_sites = client.get(
+            "/changes?event_type=%3Cscript%3Ealert(1)%3C%2Fscript%3E"
+        )
+        client.post(
+            "/sites",
+            data={"name": "Пустой", "url": "https://empty.test"},
+        )
+        no_history = client.get("/changes")
+    assert "Сайтов пока нет" in no_sites.text
+    assert invalid_without_sites.status_code == 422
+    assert "Сайтов пока нет" in invalid_without_sites.text
+    assert (
+        "Выберите один из доступных типов события"
+        in invalid_without_sites.text
+    )
+    assert "<script>alert(1)</script>" not in invalid_without_sites.text
+    assert "Общей истории ещё нет" in no_history.text
+
+
 def test_empty_event_list_has_clear_state(tmp_path: Path) -> None:
     path = tmp_path / "empty.db"
     engine = _engine(path)
@@ -616,7 +772,7 @@ def test_invalid_values_are_escaped_and_missing_page_has_filtered_first_link(
     assert "По фильтрам ничего не найдено" in no_matches.text
 
 
-def test_real_loopback_two_completed_crawls_open_exact_values_after_reopen(
+def test_real_loopback_two_sites_two_crawls_global_filter_detail_and_return(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -673,15 +829,15 @@ def test_real_loopback_two_completed_crawls_open_exact_values_after_reopen(
     )
     app = create_app(settings)
 
-    def run_once(client: TestClient) -> None:
-        token_response = client.get("/sites/1/crawl")
+    def run_once(client: TestClient, site_id: int) -> None:
+        token_response = client.get(f"/sites/{site_id}/crawl")
         token = re.search(
             r'name="action_token" value="([^"]+)"',
             token_response.text,
         )
         assert token is not None
         response = client.post(
-            "/sites/1/crawl",
+            f"/sites/{site_id}/crawl",
             data={
                 "action_token": token.group(1),
                 "max_pages": "1",
@@ -711,9 +867,37 @@ def test_real_loopback_two_completed_crawls_open_exact_values_after_reopen(
                 follow_redirects=False,
             )
             assert create.status_code == 303
-            run_once(client)
+            create_second = client.post(
+                "/sites",
+                data={
+                    "name": "Loopback второй",
+                    "url": f"http://127.0.0.1:{server.server_port}/",
+                },
+                follow_redirects=False,
+            )
+            assert create_second.status_code == 303
+            run_once(client, 1)
+            run_once(client, 2)
             version["value"] = 2
-            run_once(client)
+            run_once(client, 1)
+            run_once(client, 2)
+            global_listing = client.get("/changes")
+            assert "Loopback" in global_listing.text
+            assert "Loopback второй" in global_listing.text
+            global_filtered = client.get(
+                "/changes?site_id=1&event_type=title_changed"
+            )
+            global_href = re.search(
+                r'href="(/sites/1/changes/\d+\?scope=all&amp;site_id=1&amp;event_type=title_changed)"',
+                global_filtered.text,
+            )
+            assert global_href is not None
+            global_detail_path = unescape(global_href.group(1))
+            global_detail = client.get(global_detail_path)
+            assert (
+                'href="/changes?site_id=1&amp;event_type=title_changed">К событиям</a>'
+                in global_detail.text
+            )
             listing = client.get("/sites/1/changes?event_type=title_changed")
             assert "Изменение Title" in listing.text
             href = re.search(
@@ -738,11 +922,16 @@ def test_real_loopback_two_completed_crawls_open_exact_values_after_reopen(
         thread.join()
         server.server_close()
 
+    before = sha256(database_path.read_bytes()).hexdigest()
     reopened = create_app(settings)
     with TestClient(reopened) as client:
+        global_listing = client.get("/changes")
+        global_detail = client.get(global_detail_path)
         listing = client.get("/sites/1/changes")
         detail = client.get(detail_path)
+        assert global_listing.status_code == global_detail.status_code == 200
         assert listing.status_code == 200
         assert detail.status_code == 200
         assert "Стало &lt;точно&gt;" in detail.text
         assert "Было &amp; точно" in detail.text
+    assert sha256(database_path.read_bytes()).hexdigest() == before

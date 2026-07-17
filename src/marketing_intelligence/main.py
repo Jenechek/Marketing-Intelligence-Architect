@@ -27,9 +27,11 @@ from .change_event_filters import (
     EVENTS_PER_PAGE,
     ChangeEventListForm,
     change_event_list_url,
+    global_change_event_list_url,
     parse_change_event_list_state,
 )
 from .change_event_presentation import (
+    event_explanation,
     event_type_title,
     importance_title,
     present_sides,
@@ -198,7 +200,7 @@ def create_app(
 
     def render_change_event_error(
         request: Request,
-        site_id: int,
+        site_id: int | None,
         *,
         title: str,
         message: str,
@@ -212,7 +214,9 @@ def create_app(
             context={
                 "title": title,
                 "message": message,
-                "return_url": return_url or f"/sites/{site_id}/changes",
+                "return_url": return_url or (
+                    f"/sites/{site_id}/changes" if site_id is not None else "/changes"
+                ),
                 "action_label": action_label,
             },
             status_code=status_code,
@@ -348,6 +352,7 @@ def create_app(
         if site is None:
             return render_site_not_found(request)
         form = ChangeEventListForm(
+            site_id="",
             event_type=request.query_params.get("event_type", ""),
             date_from=request.query_params.get("date_from", ""),
             date_to=request.query_params.get("date_to", ""),
@@ -454,8 +459,134 @@ def create_app(
                     + (f"?{state.query()}" if state.query() else "")
                 ),
                 "event_type_title": event_type_title,
+                "event_explanation": event_explanation,
                 "importance_title": importance_title,
                 "to_local_datetime": to_event_local_datetime,
+            },
+        )
+
+    @application.get("/changes", response_class=HTMLResponse)
+    async def global_change_events_screen(request: Request) -> HTMLResponse:
+        sites = list_sites(request.app.state.engine)
+        form = ChangeEventListForm(
+            site_id=request.query_params.get("site_id", ""),
+            event_type=request.query_params.get("event_type", ""),
+            date_from=request.query_params.get("date_from", ""),
+            date_to=request.query_params.get("date_to", ""),
+            page=request.query_params.get("page", "1"),
+        )
+        state, errors = parse_change_event_list_state(
+            site_id=form.site_id,
+            event_type=form.event_type,
+            date_from=form.date_from,
+            date_to=form.date_to,
+            page=form.page,
+            local_timezone=active_settings.local_timezone,
+        )
+        status_code = 422 if errors else 200
+        if state is not None and state.site_id is not None:
+            if all(site.id != state.site_id for site in sites):
+                state = None
+                errors = {"site_id": "Выбранный сайт не существует."}
+                status_code = 404
+        common_context = {
+            "sites": sites,
+            "event_page": None,
+            "form": form,
+            "errors": errors,
+            "event_types": tuple(ChangeEventType),
+            "event_type_title": event_type_title,
+            "event_explanation": event_explanation,
+            "importance_title": importance_title,
+            "to_local_datetime": to_event_local_datetime,
+        }
+        if state is None or not sites:
+            return templates.TemplateResponse(
+                request=request,
+                name="global_change_events.html",
+                context=common_context,
+                status_code=status_code,
+            )
+        try:
+            offset = (state.page - 1) * EVENTS_PER_PAGE
+            query_offset = offset if offset <= (1 << 63) - 1 else 0
+            event_page = load_change_events(
+                request.app.state.engine,
+                site_id=state.site_id,
+                event_types=(state.event_type,) if state.event_type else None,
+                from_time=state.from_time,
+                before_time=state.before_time,
+                limit=EVENTS_PER_PAGE,
+                offset=query_offset,
+            )
+            if state.page > 1 and offset >= event_page.total_count:
+                return render_change_event_error(
+                    request,
+                    None,
+                    title="Страница событий не найдена",
+                    message=(
+                        "Запрошенной страницы нет. "
+                        "Перейдите к первой странице результатов."
+                    ),
+                    status_code=404,
+                    return_url=global_change_event_list_url(state, page=1),
+                    action_label="К первой странице",
+                )
+            has_any_history = bool(event_page.total_count)
+            if state.has_filters or state.site_id is not None:
+                if not has_any_history:
+                    has_any_history = bool(
+                        load_change_events(
+                            request.app.state.engine,
+                            limit=1,
+                            offset=0,
+                        ).total_count
+                    )
+        except ValueError as error:
+            request.app.state.logger.error(
+                "Повреждён общий список событий: %s",
+                error,
+            )
+            return render_change_event_error(
+                request,
+                None,
+                title="События нельзя показать",
+                message=(
+                    "Часть сохранённых данных повреждена. "
+                    "Сохранённая история не изменена."
+                ),
+                status_code=500,
+            )
+        query = state.query()
+        detail_suffix = "?scope=all" + (f"&{query}" if query else "")
+        return templates.TemplateResponse(
+            request=request,
+            name="global_change_events.html",
+            context={
+                **common_context,
+                "event_page": event_page,
+                "errors": {},
+                "state": state,
+                "has_any_history": has_any_history,
+                "current_page": state.page,
+                "total_pages": max(
+                    1,
+                    (event_page.total_count + EVENTS_PER_PAGE - 1)
+                    // EVENTS_PER_PAGE,
+                ),
+                "previous_url": (
+                    global_change_event_list_url(state, page=state.page - 1)
+                    if state.page > 1
+                    else None
+                ),
+                "next_url": (
+                    global_change_event_list_url(state, page=state.page + 1)
+                    if state.page * EVENTS_PER_PAGE < event_page.total_count
+                    else None
+                ),
+                "detail_url": lambda event: (
+                    f"/sites/{event.site_id}/changes/{event.event_id}{detail_suffix}"
+                ),
             },
         )
 
@@ -471,7 +602,17 @@ def create_app(
         site = get_site(request.app.state.engine, site_id)
         if site is None:
             return render_site_not_found(request)
+        scope = request.query_params.get("scope", "")
+        if scope not in {"", "all"}:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Параметры возврата указаны неверно",
+                message="Источник списка событий указан неверно.",
+                status_code=422,
+            )
         state, errors = parse_change_event_list_state(
+            site_id=(request.query_params.get("site_id", "") if scope == "all" else ""),
             event_type=request.query_params.get("event_type", ""),
             date_from=request.query_params.get("date_from", ""),
             date_to=request.query_params.get("date_to", ""),
@@ -486,7 +627,19 @@ def create_app(
                 message=" ".join(errors.values()),
                 status_code=422,
             )
-        return_url = change_event_list_url(site_id, state)
+        if scope == "all" and state.site_id not in {None, site_id}:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Параметры возврата указаны неверно",
+                message="Фильтр сайта не соответствует открытому событию.",
+                status_code=422,
+            )
+        return_url = (
+            global_change_event_list_url(state)
+            if scope == "all"
+            else change_event_list_url(site_id, state)
+        )
         try:
             detail = load_change_event(
                 request.app.state.engine,
@@ -531,6 +684,7 @@ def create_app(
                 "previous_side": previous_side,
                 "event_type_title": event_type_title,
                 "importance_title": importance_title,
+                "event_explanation": event_explanation,
                 "to_local_datetime": to_event_local_datetime,
                 "return_url": return_url,
             },

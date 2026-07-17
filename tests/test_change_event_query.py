@@ -154,6 +154,9 @@ def test_query_isolates_sites_and_returns_exact_immutable_dtos(engine) -> None:
     assert text_item.importance is ChangeImportance.HIGH
     assert text_item.text_distance == 7
     assert text_item.change_ratio == Fraction(2, 3)
+    assert text_item.site_id == first_site
+    assert text_item.site_name == "first"
+    assert text_item.site_url == "https://first.example"
     assert text_item.current_page_record_id == 101
     assert text_item.previous_page_record_id == 91
     assert page.items[0].current_page_record_id is None
@@ -163,6 +166,18 @@ def test_query_isolates_sites_and_returns_exact_immutable_dtos(engine) -> None:
     with pytest.raises(FrozenInstanceError):
         text_item.weight = 1  # type: ignore[misc]
     assert PersistenceChangeEventType is ChangeEventType
+
+
+def test_query_all_sites_and_optional_site_filter_share_one_order(engine) -> None:
+    first_site, second_site, ids = _seed(engine)
+
+    all_sites = load_change_events(engine)
+    second_only = load_change_events(engine, site_id=second_site)
+
+    assert all_sites.total_count == 3
+    assert [item.event_id for item in all_sites.items] == [ids[2], ids[1], ids[0]]
+    assert {item.site_id for item in all_sites.items} == {first_site, second_site}
+    assert [item.event_id for item in second_only.items] == [ids[2]]
 
 
 def test_type_and_importance_filters_work_separately_and_together(engine) -> None:
@@ -238,6 +253,11 @@ def test_invalid_inputs_are_rejected_before_query(engine, kwargs, message) -> No
     finally:
         event.remove(engine, "before_cursor_execute", count_statement)
     assert statements == 0
+
+
+def test_invalid_site_id_is_rejected_before_query(engine) -> None:
+    with pytest.raises(ValueError, match="site_id"):
+        load_change_events(engine, site_id=0)
 
 
 def test_stable_order_pagination_total_and_two_queries(engine) -> None:

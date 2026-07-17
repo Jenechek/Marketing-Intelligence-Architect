@@ -24,6 +24,35 @@ IMPORTANCE_TITLES = {
     ChangeImportance.HIGH: "Высокая",
 }
 
+EVENT_EXPLANATIONS = {
+    ChangeEventType.PAGE_ADDED: (
+        "В текущем завершённом обходе найдена страница, которой не было "
+        "в предыдущем завершённом обходе."
+    ),
+    ChangeEventType.PAGE_REMOVED: (
+        "Страница была в предыдущем завершённом обходе, но отсутствует "
+        "в текущем завершённом обходе."
+    ),
+    ChangeEventType.TITLE_CHANGED: (
+        "Значение Title страницы отличается от предыдущего завершённого обхода."
+    ),
+    ChangeEventType.DESCRIPTION_CHANGED: (
+        "Значение Description страницы отличается от предыдущего "
+        "завершённого обхода."
+    ),
+    ChangeEventType.H1_CHANGED: (
+        "Значение H1 страницы отличается от предыдущего завершённого обхода."
+    ),
+    ChangeEventType.TEXT_CHANGED: (
+        "Нормализованный текст страницы отличается от предыдущего "
+        "завершённого обхода."
+    ),
+    ChangeEventType.INTERNAL_LINKS_CHANGED: (
+        "Набор внутренних ссылок страницы отличается от предыдущего "
+        "завершённого обхода."
+    ),
+}
+
 
 class ValueState(str, Enum):
     ABSENT_SIDE = "absent_side"
@@ -47,6 +76,12 @@ def event_type_title(event_type: ChangeEventType) -> str:
 
 def importance_title(importance: ChangeImportance) -> str:
     return IMPORTANCE_TITLES[importance]
+
+
+def event_explanation(event_type: ChangeEventType) -> str:
+    """Вернуть детерминированное фактическое объяснение типа события."""
+
+    return EVENT_EXPLANATIONS[event_type]
 
 
 def present_sides(

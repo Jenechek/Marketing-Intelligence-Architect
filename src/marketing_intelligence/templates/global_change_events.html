@@ -3,40 +3,53 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Изменения — {{ site.name }}</title>
+    <title>Все изменения — Marketing Intelligence</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
 </head>
 <body>
     <main class="page-shell">
         <header class="page-header">
             <div>
-                <p class="eyebrow">Изменения сайта</p>
-                <h1>{{ site.name }}</h1>
-                <p class="lead break-text">{{ site.url }}</p>
+                <p class="eyebrow">История изменений</p>
+                <h1>Все изменения</h1>
+                <p class="lead">События всех добавленных сайтов в одной хронологической ленте.</p>
             </div>
             <a class="secondary-action" href="/">К списку сайтов</a>
         </header>
 
+        {% if errors %}
+        <div class="notice error" role="alert">
+            <strong>Проверьте параметры фильтров.</strong>
+            <ul>{% for message in errors.values() %}<li>{{ message }}</li>{% endfor %}</ul>
+            {% if errors.page %}<p>Получено: {{ form.page }}</p>{% endif %}
+        </div>
+        {% endif %}
+
+        {% if not sites %}
+        <section class="content-card empty-state" aria-labelledby="no-sites-title">
+            <h2 id="no-sites-title">Сайтов пока нет</h2>
+            <p>Сначала добавьте сайт на главном экране. После повторных обходов изменения появятся здесь.</p>
+            <a class="secondary-action" href="/#add-site">Добавить сайт</a>
+        </section>
+        {% else %}
         <section class="content-card" aria-labelledby="filters-title">
             <h2 id="filters-title">Фильтры</h2>
-            {% if errors %}
-            <div class="notice error" role="alert">
-                <strong>Проверьте параметры фильтров.</strong>
-                <ul>
-                    {% for message in errors.values() %}<li>{{ message }}</li>{% endfor %}
-                </ul>
-                {% if errors.page %}<p>Получено: {{ form.page }}</p>{% endif %}
-            </div>
-            {% endif %}
-            <form class="filter-form" method="get" action="/sites/{{ site.id }}/changes">
+            <form class="filter-form" method="get" action="/changes">
+                <div class="field">
+                    <label for="site_id">Сайт</label>
+                    <select id="site_id" name="site_id" {% if errors.site_id %}aria-invalid="true" aria-describedby="site-id-error"{% endif %}>
+                        <option value="">Все сайты</option>
+                        {% if errors.site_id and form.site_id %}<option value="{{ form.site_id }}" selected disabled>{{ form.site_id }}</option>{% endif %}
+                        {% for site in sites %}<option value="{{ site.id }}" {% if form.site_id == site.id|string %}selected{% endif %}>{{ site.name }}</option>{% endfor %}
+                    </select>
+                    {% if errors.site_id %}<p class="field-error" id="site-id-error">{{ errors.site_id }}</p>{% endif %}
+                </div>
                 <div class="field">
                     <label for="event_type">Тип события</label>
                     <select id="event_type" name="event_type" {% if errors.event_type %}aria-invalid="true" aria-describedby="event-type-error"{% endif %}>
                         <option value="">Все типы</option>
                         {% if errors.event_type %}<option value="{{ form.event_type }}" selected disabled>{{ form.event_type }}</option>{% endif %}
-                        {% for item in event_types %}
-                        <option value="{{ item.value }}" {% if form.event_type == item.value %}selected{% endif %}>{{ event_type_title(item) }}</option>
-                        {% endfor %}
+                        {% for item in event_types %}<option value="{{ item.value }}" {% if form.event_type == item.value %}selected{% endif %}>{{ event_type_title(item) }}</option>{% endfor %}
                     </select>
                     {% if errors.event_type %}<p class="field-error" id="event-type-error">{{ errors.event_type }}</p>{% endif %}
                 </div>
@@ -55,7 +68,7 @@
                 {% if errors.date_range %}<p class="field-error">{{ errors.date_range }}</p>{% endif %}
                 <div class="form-actions">
                     <button class="primary-action" type="submit">Применить фильтры</button>
-                    <a class="secondary-action" href="/sites/{{ site.id }}/changes">Сбросить</a>
+                    <a class="secondary-action" href="/changes">Сбросить</a>
                 </div>
             </form>
         </section>
@@ -74,15 +87,12 @@
                 {% for event in event_page.items %}
                 <li>
                     <div>
-                        <strong>{{ event_type_title(event.event_type) }}</strong>
-                        <p class="event-meta">
-                            Важность: {{ importance_title(event.importance) }} ·
-                            {{ to_local_datetime(event.current_completed_at) }}
-                        </p>
+                        <strong>{{ event.site_name }} — {{ event_type_title(event.event_type) }}</strong>
+                        <p class="event-meta">Важность: {{ importance_title(event.importance) }} · {{ to_local_datetime(event.current_completed_at) }}</p>
                         <p>{{ event_explanation(event.event_type) }}</p>
                         <p class="break-text">{{ event.url }}</p>
                     </div>
-                    <a class="secondary-action" href="{{ detail_url(event.event_id) }}">Подробнее</a>
+                    <a class="secondary-action" href="{{ detail_url(event) }}">Подробнее</a>
                 </li>
                 {% endfor %}
             </ol>
@@ -92,17 +102,12 @@
                 {% if next_url %}<a class="secondary-action" rel="next" href="{{ next_url }}">Вперёд</a>{% else %}<span></span>{% endif %}
             </nav>
             {% elif has_any_history %}
-            <div class="empty-state">
-                <h3>По фильтрам ничего не найдено</h3>
-                <p>Измените параметры или сбросьте фильтры, чтобы увидеть историю.</p>
-            </div>
+            <div class="empty-state"><h3>По фильтрам ничего не найдено</h3><p>Измените параметры или сбросьте фильтры, чтобы увидеть историю.</p></div>
             {% else %}
-            <div class="empty-state">
-                <h3>Истории ещё нет</h3>
-                <p>После двух завершённых обходов обнаруженные изменения появятся здесь.</p>
-            </div>
+            <div class="empty-state"><h3>Общей истории ещё нет</h3><p>После двух завершённых обходов добавленных сайтов обнаруженные изменения появятся здесь.</p></div>
             {% endif %}
         </section>
+        {% endif %}
         {% endif %}
     </main>
 </body>
