@@ -20,12 +20,14 @@
         <section class="content-card" aria-labelledby="event-summary-title">
             <h2 id="event-summary-title">Событие</h2>
             <dl class="summary-list">
+                <div><dt>Сайт</dt><dd>{{ site.name }}</dd></div>
                 <div><dt>Важность</dt><dd>{{ importance_title(detail.importance) }}</dd></div>
                 <div>
                     <dt>Обнаружено</dt>
                     <dd>{{ to_local_datetime(detail.current_completed_at) }}</dd>
                 </div>
             </dl>
+            <p>{{ event_explanation(detail.event_type) }}</p>
         </section>
 
         <section class="comparison" aria-label="Сравнение значений: Стало, затем Было">

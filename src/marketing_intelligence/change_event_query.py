@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 
 from .change_event import ChangeEventType
 from .change_importance import ChangeImportance
-from .models import CrawlRun, SnapshotChangeEvent
+from .models import CrawlRun, Site, SnapshotChangeEvent
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,6 +19,9 @@ class ChangeEventItem:
     """Неизменяемое представление одного сохранённого события."""
 
     event_id: int
+    site_id: int
+    site_name: str
+    site_url: str
     event_type: ChangeEventType
     url: str
     current_completed_at: datetime
@@ -45,7 +48,7 @@ class ChangeEventPage:
 def load_change_events(
     engine: Engine,
     *,
-    site_id: int,
+    site_id: int | None = None,
     event_types: Collection[ChangeEventType | str] | None = None,
     importance_levels: Collection[ChangeImportance | str] | None = None,
     from_time: datetime | None = None,
@@ -53,7 +56,7 @@ def load_change_events(
     limit: int = 100,
     offset: int = 0,
 ) -> ChangeEventPage:
-    """Загрузить страницу событий сайта по сочетаемым фильтрам."""
+    """Загрузить страницу событий всех или одного сайта по фильтрам."""
 
     normalized_from = _normalize_datetime(from_time, "from_time")
     normalized_before = _normalize_datetime(before_time, "before_time")
@@ -71,7 +74,11 @@ def load_change_events(
         ChangeImportance,
         "importance_levels",
     )
-    filters = [CrawlRun.site_id == site_id]
+    filters = []
+    if site_id is not None:
+        if isinstance(site_id, bool) or not isinstance(site_id, int) or site_id < 1:
+            raise ValueError("site_id должен быть положительным целым числом.")
+        filters.append(CrawlRun.site_id == site_id)
     if type_values is not None:
         filters.append(SnapshotChangeEvent.event_type.in_(type_values))
     if importance_values is not None:
@@ -94,6 +101,9 @@ def load_change_events(
     item_statement = (
         select(
             SnapshotChangeEvent.id,
+            Site.id.label("site_id"),
+            Site.name.label("site_name"),
+            Site.url.label("site_url"),
             SnapshotChangeEvent.event_type,
             SnapshotChangeEvent.url,
             SnapshotChangeEvent.current_completed_at,
@@ -108,6 +118,7 @@ def load_change_events(
             SnapshotChangeEvent.change_ratio_denominator,
         )
         .join(CrawlRun, SnapshotChangeEvent.current_run_id == CrawlRun.id)
+        .join(Site, CrawlRun.site_id == Site.id)
         .where(*filters)
         .order_by(
             SnapshotChangeEvent.current_completed_at.desc(),
@@ -167,6 +178,9 @@ def _item_from_row(row) -> ChangeEventItem:
     )
     return ChangeEventItem(
         event_id=row.id,
+        site_id=row.site_id,
+        site_name=row.site_name,
+        site_url=row.site_url,
         event_type=ChangeEventType(row.event_type),
         url=row.url,
         current_completed_at=row.current_completed_at,

@@ -14,6 +14,8 @@ EVENTS_PER_PAGE = 20
 class ChangeEventListState:
     """Проверенные фильтры и номер страницы без пользовательского URL возврата."""
 
+    site_id_value: str
+    site_id: int | None
     event_type_value: str
     date_from_value: str
     date_to_value: str
@@ -35,6 +37,8 @@ class ChangeEventListState:
         """Собрать строку только из разрешённых и уже проверенных параметров."""
 
         values: list[tuple[str, str]] = []
+        if self.site_id_value:
+            values.append(("site_id", self.site_id_value))
         if self.event_type_value:
             values.append(("event_type", self.event_type_value))
         if self.date_from_value:
@@ -49,6 +53,7 @@ class ChangeEventListState:
 
 @dataclass(frozen=True, slots=True)
 class ChangeEventListForm:
+    site_id: str
     event_type: str
     date_from: str
     date_to: str
@@ -57,6 +62,7 @@ class ChangeEventListForm:
 
 def parse_change_event_list_state(
     *,
+    site_id: str = "",
     event_type: str,
     date_from: str,
     date_to: str,
@@ -66,6 +72,14 @@ def parse_change_event_list_state(
     """Проверить GET-параметры и перевести границы локальных дат в UTC."""
 
     errors: dict[str, str] = {}
+    parsed_site_id: int | None = None
+    if site_id:
+        try:
+            parsed_site_id = int(site_id)
+            if str(parsed_site_id) != site_id or parsed_site_id < 1:
+                raise ValueError
+        except ValueError:
+            errors["site_id"] = "Выберите существующий сайт из списка."
     parsed_type: ChangeEventType | None = None
     if event_type:
         try:
@@ -102,6 +116,8 @@ def parse_change_event_list_state(
         return None, {"date_to": "Дата выходит за поддерживаемый диапазон."}
     return (
         ChangeEventListState(
+            site_id_value=site_id,
+            site_id=parsed_site_id,
             event_type_value=event_type,
             date_from_value=date_from,
             date_to_value=date_to,
@@ -124,6 +140,17 @@ def change_event_list_url(
     query = state.query(page=page)
     base = f"/sites/{site_id}/changes"
     return f"{base}?{query}" if query else base
+
+
+def global_change_event_list_url(
+    state: ChangeEventListState,
+    *,
+    page: int | None = None,
+) -> str:
+    """Собрать безопасную ссылку общей ленты из проверенного состояния."""
+
+    query = state.query(page=page)
+    return f"/changes?{query}" if query else "/changes"
 
 
 def _parse_date(
