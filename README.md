@@ -25,25 +25,11 @@ python -m pip install -e ".[test]"
 python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
 ```
 
-## Быстрый запуск на macOS
+## Быстрый запуск на macOS и Linux
 
-> Эта инструкция ещё не проверена на реальной системе macOS.
+> Эта инструкция ещё не проверена на реальных системах macOS и Linux.
 
 Откройте Terminal в папке проекта и последовательно выполните:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[test]"
-python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
-```
-
-## Быстрый запуск на Linux
-
-> Эта инструкция ещё не проверена на реальной системе Linux.
-
-Откройте терминал в папке проекта и последовательно выполните:
 
 ```bash
 python3 -m venv .venv
