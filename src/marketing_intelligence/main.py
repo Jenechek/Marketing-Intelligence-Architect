@@ -22,6 +22,13 @@ from .check_history import (
     to_local_datetime,
 )
 from .change_event_detail import ChangeEventDataError, load_change_event
+from .change_event import ChangeEventType
+from .change_event_filters import (
+    EVENTS_PER_PAGE,
+    ChangeEventListForm,
+    change_event_list_url,
+    parse_change_event_list_state,
+)
 from .change_event_presentation import (
     event_type_title,
     importance_title,
@@ -196,6 +203,8 @@ def create_app(
         title: str,
         message: str,
         status_code: int,
+        return_url: str | None = None,
+        action_label: str = "Вернуться к событиям",
     ) -> HTMLResponse:
         return templates.TemplateResponse(
             request=request,
@@ -203,7 +212,8 @@ def create_app(
             context={
                 "title": title,
                 "message": message,
-                "return_url": f"/sites/{site_id}/changes",
+                "return_url": return_url or f"/sites/{site_id}/changes",
+                "action_label": action_label,
             },
             status_code=status_code,
         )
@@ -331,11 +341,77 @@ def create_app(
         site = get_site(request.app.state.engine, site_id)
         if site is None:
             return render_site_not_found(request)
+        form = ChangeEventListForm(
+            event_type=request.query_params.get("event_type", ""),
+            date_from=request.query_params.get("date_from", ""),
+            date_to=request.query_params.get("date_to", ""),
+            page=request.query_params.get("page", "1"),
+        )
+        state, errors = parse_change_event_list_state(
+            event_type=form.event_type,
+            date_from=form.date_from,
+            date_to=form.date_to,
+            page=form.page,
+            local_timezone=active_settings.local_timezone,
+        )
+        if state is None:
+            return templates.TemplateResponse(
+                request=request,
+                name="change_events.html",
+                context={
+                    "site": site,
+                    "event_page": None,
+                    "form": form,
+                    "errors": errors,
+                    "event_types": tuple(ChangeEventType),
+                    "event_type_title": event_type_title,
+                },
+                status_code=422,
+            )
         try:
-            event_page = load_change_events(
+            first_page = load_change_events(
                 request.app.state.engine,
                 site_id=site_id,
+                event_types=(state.event_type,) if state.event_type else None,
+                from_time=state.from_time,
+                before_time=state.before_time,
+                limit=EVENTS_PER_PAGE,
+                offset=0,
             )
+            offset = (state.page - 1) * EVENTS_PER_PAGE
+            if state.page > 1 and offset >= first_page.total_count:
+                return render_change_event_error(
+                    request,
+                    site_id,
+                    title="Страница событий не найдена",
+                    message="Запрошенной страницы нет. Перейдите к первой странице результатов.",
+                    status_code=404,
+                    return_url=change_event_list_url(site_id, state, page=1),
+                    action_label="К первой странице",
+                )
+            event_page = (
+                first_page
+                if state.page == 1
+                else load_change_events(
+                    request.app.state.engine,
+                    site_id=site_id,
+                    event_types=(state.event_type,) if state.event_type else None,
+                    from_time=state.from_time,
+                    before_time=state.before_time,
+                    limit=EVENTS_PER_PAGE,
+                    offset=offset,
+                )
+            )
+            has_any_history = bool(event_page.total_count)
+            if state.has_filters and not has_any_history:
+                has_any_history = bool(
+                    load_change_events(
+                        request.app.state.engine,
+                        site_id=site_id,
+                        limit=1,
+                        offset=0,
+                    ).total_count
+                )
         except ValueError as error:
             request.app.state.logger.error(
                 "Повреждён список событий сайта %s: %s",
@@ -358,6 +434,31 @@ def create_app(
             context={
                 "site": site,
                 "event_page": event_page,
+                "form": form,
+                "errors": {},
+                "state": state,
+                "event_types": tuple(ChangeEventType),
+                "has_any_history": has_any_history,
+                "current_page": state.page,
+                "total_pages": max(
+                    1,
+                    (event_page.total_count + EVENTS_PER_PAGE - 1)
+                    // EVENTS_PER_PAGE,
+                ),
+                "previous_url": (
+                    change_event_list_url(site_id, state, page=state.page - 1)
+                    if state.page > 1
+                    else None
+                ),
+                "next_url": (
+                    change_event_list_url(site_id, state, page=state.page + 1)
+                    if state.page * EVENTS_PER_PAGE < event_page.total_count
+                    else None
+                ),
+                "detail_url": lambda event_id: (
+                    f"/sites/{site_id}/changes/{event_id}"
+                    + (f"?{state.query()}" if state.query() else "")
+                ),
                 "event_type_title": event_type_title,
                 "importance_title": importance_title,
                 "to_local_datetime": to_local_datetime,
@@ -376,6 +477,22 @@ def create_app(
         site = get_site(request.app.state.engine, site_id)
         if site is None:
             return render_site_not_found(request)
+        state, errors = parse_change_event_list_state(
+            event_type=request.query_params.get("event_type", ""),
+            date_from=request.query_params.get("date_from", ""),
+            date_to=request.query_params.get("date_to", ""),
+            page=request.query_params.get("page", "1"),
+            local_timezone=active_settings.local_timezone,
+        )
+        if state is None:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Параметры возврата указаны неверно",
+                message=" ".join(errors.values()),
+                status_code=422,
+            )
+        return_url = change_event_list_url(site_id, state)
         try:
             detail = load_change_event(
                 request.app.state.engine,
@@ -398,6 +515,7 @@ def create_app(
                     "Сохранённая история не изменена."
                 ),
                 status_code=500,
+                return_url=return_url,
             )
         if detail is None:
             return render_change_event_error(
@@ -406,6 +524,7 @@ def create_app(
                 title="Событие не найдено",
                 message="В этом сайте такого события нет.",
                 status_code=404,
+                return_url=return_url,
             )
         current_side, previous_side = present_sides(detail)
         return templates.TemplateResponse(
@@ -419,6 +538,7 @@ def create_app(
                 "event_type_title": event_type_title,
                 "importance_title": importance_title,
                 "to_local_datetime": to_local_datetime,
+                "return_url": return_url,
             },
         )
 
