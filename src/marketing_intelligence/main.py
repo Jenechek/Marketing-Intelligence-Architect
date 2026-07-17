@@ -218,6 +218,12 @@ def create_app(
             status_code=status_code,
         )
 
+    def to_event_local_datetime(value):
+        return to_local_datetime(
+            value,
+            target_timezone=active_settings.local_timezone,
+        )
+
     def render_delete_forbidden(request: Request, site: Site) -> HTMLResponse:
         return templates.TemplateResponse(
             request=request,
@@ -369,17 +375,18 @@ def create_app(
                 status_code=422,
             )
         try:
-            first_page = load_change_events(
+            offset = (state.page - 1) * EVENTS_PER_PAGE
+            query_offset = offset if offset <= (1 << 63) - 1 else 0
+            event_page = load_change_events(
                 request.app.state.engine,
                 site_id=site_id,
                 event_types=(state.event_type,) if state.event_type else None,
                 from_time=state.from_time,
                 before_time=state.before_time,
                 limit=EVENTS_PER_PAGE,
-                offset=0,
+                offset=query_offset,
             )
-            offset = (state.page - 1) * EVENTS_PER_PAGE
-            if state.page > 1 and offset >= first_page.total_count:
+            if state.page > 1 and offset >= event_page.total_count:
                 return render_change_event_error(
                     request,
                     site_id,
@@ -389,19 +396,6 @@ def create_app(
                     return_url=change_event_list_url(site_id, state, page=1),
                     action_label="К первой странице",
                 )
-            event_page = (
-                first_page
-                if state.page == 1
-                else load_change_events(
-                    request.app.state.engine,
-                    site_id=site_id,
-                    event_types=(state.event_type,) if state.event_type else None,
-                    from_time=state.from_time,
-                    before_time=state.before_time,
-                    limit=EVENTS_PER_PAGE,
-                    offset=offset,
-                )
-            )
             has_any_history = bool(event_page.total_count)
             if state.has_filters and not has_any_history:
                 has_any_history = bool(
@@ -461,7 +455,7 @@ def create_app(
                 ),
                 "event_type_title": event_type_title,
                 "importance_title": importance_title,
-                "to_local_datetime": to_local_datetime,
+                "to_local_datetime": to_event_local_datetime,
             },
         )
 
@@ -537,7 +531,7 @@ def create_app(
                 "previous_side": previous_side,
                 "event_type_title": event_type_title,
                 "importance_title": importance_title,
-                "to_local_datetime": to_local_datetime,
+                "to_local_datetime": to_event_local_datetime,
                 "return_url": return_url,
             },
         )

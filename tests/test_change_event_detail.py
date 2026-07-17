@@ -12,7 +12,7 @@ import time
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import text
+from sqlalchemy import event as sqlalchemy_event, text
 from sqlmodel import Session
 
 from marketing_intelligence.change_event import ChangeEventType
@@ -466,6 +466,7 @@ def test_filters_dates_pagination_links_errors_and_read_only(
             local_timezone=timezone(timedelta(hours=3)),
         )
     )
+    event_sql: list[str] = []
     with TestClient(app) as client:
         by_type = client.get(
             f"/sites/{site_id}/changes?event_type=title_changed"
@@ -479,10 +480,34 @@ def test_filters_dates_pagination_links_errors_and_read_only(
         first = client.get(
             f"/sites/{site_id}/changes?date_from=2026-07-17&date_to=2026-07-17"
         )
-        second = client.get(
-            f"/sites/{site_id}/changes?date_from=2026-07-17"
-            "&date_to=2026-07-17&page=2"
+
+        def record_sql(
+            connection,
+            cursor,
+            statement,
+            parameters,
+            context,
+            executemany,
+        ):
+            if "snapshotchangeevent" in statement.lower():
+                event_sql.append(statement)
+
+        sqlalchemy_event.listen(
+            app.state.engine,
+            "before_cursor_execute",
+            record_sql,
         )
+        try:
+            second = client.get(
+                f"/sites/{site_id}/changes?date_from=2026-07-17"
+                "&date_to=2026-07-17&page=2"
+            )
+        finally:
+            sqlalchemy_event.remove(
+                app.state.engine,
+                "before_cursor_execute",
+                record_sql,
+            )
 
         first_ids = set(re.findall(r"/changes/(\d+)\?", first.text))
         second_ids = set(re.findall(r"/changes/(\d+)\?", second.text))
@@ -499,7 +524,12 @@ def test_filters_dates_pagination_links_errors_and_read_only(
     assert "Найдено: 25." in by_from.text
     assert "Найдено: 25." in by_to.text
     assert "Найдено: 1." in combined.text
+    assert "2026-07-17 15:00:00+03:00" in by_type.text
+    assert "2026-07-17 15:00:00+03:00" in combined.text
     assert first.status_code == second.status_code == detail.status_code == 200
+    assert "2026-07-17 15:00:00+03:00" in detail.text
+    assert len(event_sql) == 2
+    assert sum("count(" in statement.lower() for statement in event_sql) == 1
     assert "Страница 1 из 2" in first.text
     assert "Страница 2 из 2" in second.text
     assert len(first_ids) == 20 and len(second_ids) == 5
