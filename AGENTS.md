@@ -25,6 +25,7 @@ Do not reread unrelated unchanged documents. If sources conflict, stop and repor
 ## Product constraints
 
 - Keep the current application local-first and useful without paid services, mandatory public cloud hosting, paid proxies, or paid AI APIs.
+- Treat Windows 10/11, macOS, and Linux as equal local desktop targets. Keep the same product capabilities available on each platform; only launch and environment commands may differ.
 - Preserve the mandatory path to a multi-user corporate-server deployment; do not add PostgreSQL, authentication infrastructure, distributed workers, or deployment components before the stage that needs them.
 - Free external services may be optional integrations only.
 - Prefer simple, maintainable, open-source, locally installable solutions with suitable licenses.
@@ -42,6 +43,7 @@ Approved stack for the current local version: Python, FastAPI, SQLite, SQLModel,
 - Avoid global mutable state, duplicate implementations, premature abstractions, and dead code.
 - Keep configuration outside source code and secrets in ignored environment or local configuration.
 - Avoid hard-coded machine paths and Windows-only assumptions; keep runtime paths, database URLs, hosts, ports, and other deployment settings configurable.
+- Use cross-platform Python and web standards for paths, environment variables, text encoding, filesystem operations, processes, and browser interfaces. If a platform was not actually tested, document that limitation instead of claiming verified support.
 - Keep durable data and long-running-operation state behind explicit persistence interfaces; do not introduce new correctness-critical state that exists only in one process memory.
 - Isolate database-engine, session, transaction, locking, and filesystem details so future PostgreSQL and corporate-server migration do not require changes to crawling, parsing, comparison, or presentation logic.
 - Make database changes explicit and reversible; preserve previously collected data.

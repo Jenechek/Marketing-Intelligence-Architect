@@ -6,10 +6,12 @@ Marketing Intelligence — локальное веб-приложение для
 
 ## Требования к окружению
 
-- Windows 10 или Windows 11;
+- Windows 10/11, macOS или Linux;
 - Python 3.11 или новее;
-- Яндекс Браузер, Google Chrome или Mozilla Firefox;
+- современный настольный браузер: Яндекс Браузер, Google Chrome, Microsoft Edge, Mozilla Firefox или Safari;
 - интернет для первой установки Python-зависимостей.
+
+Практический запуск и пользовательская проверка пока выполнены только на Windows. Инструкции для macOS и Linux составлены по стандартному способу запуска Python-проектов, но ещё не проверены на реальных системах.
 
 ## Быстрый запуск на Windows
 
@@ -23,7 +25,35 @@ python -m pip install -e ".[test]"
 python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
 ```
 
-Откройте [http://127.0.0.1:8000](http://127.0.0.1:8000) в поддерживаемом браузере.
+## Быстрый запуск на macOS
+
+> Эта инструкция ещё не проверена на реальной системе macOS.
+
+Откройте Terminal в папке проекта и последовательно выполните:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
+```
+
+## Быстрый запуск на Linux
+
+> Эта инструкция ещё не проверена на реальной системе Linux.
+
+Откройте терминал в папке проекта и последовательно выполните:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e ".[test]"
+python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
+```
+
+После запуска откройте [http://127.0.0.1:8000](http://127.0.0.1:8000) в поддерживаемом браузере.
 
 На странице заполните поля «Название» и «URL», затем нажмите «Добавить сайт». Сайт появится в списке и останется доступен после перезапуска приложения.
 
@@ -35,9 +65,9 @@ python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
 
 ## Остановка
 
-В окне PowerShell нажмите `Ctrl+C`. Затем при необходимости выйдите из виртуального окружения:
+В окне PowerShell или терминала, где работает приложение, нажмите `Ctrl+C`. Затем при необходимости выйдите из виртуального окружения:
 
-```powershell
+```text
 deactivate
 ```
 
@@ -66,6 +96,14 @@ $env:MI_LOGS_DIR = "D:\Marketing Intelligence\logs"
 python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
 ```
 
+В macOS или Linux используются равнозначные команды:
+
+```bash
+export MI_DATA_DIR="$HOME/marketing-intelligence-data"
+export MI_LOGS_DIR="$HOME/marketing-intelligence-logs"
+python -m uvicorn marketing_intelligence.main:app --host 127.0.0.1 --port 8000
+```
+
 Для точного адреса SQLite предназначена переменная `MI_DATABASE_URL`. Обычному пользователю она не требуется.
 
 ## Структура проекта
@@ -90,7 +128,8 @@ marketing-intelligence/
 - сохранённые снимки и цены пока не имеют отдельного экрана и не сравниваются между обходами;
 - приложение рассчитано на одного локального пользователя;
 - доступ из интернета не настраивается;
-- пользовательская проверка на Windows пройдена в Яндекс Браузере, Google Chrome и Mozilla Firefox.
+- пользовательская проверка на Windows пройдена в Яндекс Браузере, Google Chrome и Mozilla Firefox;
+- инструкции запуска на macOS и Linux ещё не проверены на реальных системах; подтверждённая совместимость будет зафиксирована только после фактической проверки.
 
 ## Документация
 
