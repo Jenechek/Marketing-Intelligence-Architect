@@ -1,29 +1,17 @@
 """Переносимое идемпотентное сохранение событий сравнения снимков."""
 
-from enum import Enum
 from fractions import Fraction
 
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
+from .change_event import ChangeEventType
 from .models import SnapshotChangeEvent
 from .snapshot_comparison_aggregation import (
     ChangedSnapshotPageComparison,
     CompletedSnapshotComparisonResult,
 )
 from .snapshot_metadata_comparison import MetadataField
-
-
-class ChangeEventType(str, Enum):
-    """Поддерживаемые отдельные события сравнения снимков."""
-
-    PAGE_ADDED = "page_added"
-    PAGE_REMOVED = "page_removed"
-    TITLE_CHANGED = "title_changed"
-    DESCRIPTION_CHANGED = "description_changed"
-    H1_CHANGED = "h1_changed"
-    TEXT_CHANGED = "text_changed"
-    INTERNAL_LINKS_CHANGED = "internal_links_changed"
 
 
 _METADATA_EVENT_TYPES = {
