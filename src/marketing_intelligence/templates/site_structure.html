@@ -27,6 +27,18 @@
         <a class="secondary-action" href="/">К сайтам</a>
     </header>
 
+    {% if errors %}
+    <section class="content-card" aria-labelledby="filter-errors-title">
+        <h2 id="filter-errors-title">Параметры фильтра указаны неверно</h2>
+        <div class="notice error" role="alert">
+            <p>Проверьте параметры фильтра.</p>
+            <ul>
+                {% for error in errors.values() %}<li>{{ error }}</li>{% endfor %}
+            </ul>
+        </div>
+    </section>
+    {% endif %}
+
     {% if not selected %}
     <section class="content-card empty-state"><h2>Подходящего обхода пока нет</h2><p>Карта появится после завершённого или частично завершённого полного обхода.</p><a class="primary-action" href="/sites/{{ site.id }}/crawl">Начать полный обход</a></section>
     {% else %}
@@ -48,7 +60,6 @@
     {% else %}
     <section class="content-card" aria-labelledby="filters-title">
         <div class="section-heading"><div><h2 id="filters-title">Фильтры</h2><p>Фильтры применяются к списку, дереву и графу.</p></div></div>
-        {% if errors %}<div class="notice error" role="alert">Проверьте параметры фильтра.</div>{% endif %}
         <form class="filter-form" method="get" action="/sites/{{ site.id }}/structure" novalidate>
             <div class="filter-grid">
                 <div class="field"><label for="url">Подстрока URL</label><input id="url" name="url" value="{{ form.url }}" maxlength="2048" {% if errors.url %}aria-invalid="true" aria-describedby="url-error"{% endif %}>{% if errors.url %}<p class="field-error" id="url-error">{{ errors.url }}</p>{% endif %}</div>

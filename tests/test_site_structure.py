@@ -269,6 +269,53 @@ def test_graph_refuses_more_than_100_nodes_until_filter_is_applied(tmp_path: Pat
         assert "https://large.test/node-100" in filtered.text
 
 
+def test_invalid_filters_are_visible_without_a_run_and_with_an_empty_run(tmp_path: Path):
+    app, _ = build_app(tmp_path)
+    with TestClient(app) as client:
+        with Session(app.state.engine, expire_on_commit=False) as session:
+            no_run = seed_site(session, name="Без обхода", url="https://none.test/")
+            empty_site = seed_site(session, name="Пустой", url="https://empty.test/")
+            seed_run(session, empty_site.id)
+            session.commit()
+
+        missing = client.get(f"/sites/{no_run.id}/structure?depth=-1")
+        assert missing.status_code == 422
+        assert "Параметры фильтра указаны неверно" in missing.text
+        assert "Проверьте параметры фильтра" in missing.text
+        assert "Глубина должна быть целым неотрицательным числом" in missing.text
+        assert 'role="alert"' in missing.text
+        assert "Подходящего обхода пока нет" in missing.text
+
+        empty = client.get(f"/sites/{empty_site.id}/structure?depth=-1")
+        assert empty.status_code == 422
+        assert "Параметры фильтра указаны неверно" in empty.text
+        assert "Глубина должна быть целым неотрицательным числом" in empty.text
+        assert "В обходе нет страниц" in empty.text
+
+
+def test_filter_text_is_escaped_and_valid_filters_still_work(tmp_path: Path):
+    app, _ = build_app(tmp_path)
+    with TestClient(app) as client:
+        with Session(app.state.engine, expire_on_commit=False) as session:
+            site = seed_site(session)
+            run = seed_run(session, site.id)
+            seed_page(session, run.id, 1, "https://example.test/")
+            session.commit()
+
+        unsafe = client.get(
+            f"/sites/{site.id}/structure",
+            params={"url": '<script>alert("filter")</script>'},
+        )
+        assert unsafe.status_code == 200
+        assert "<script>" not in unsafe.text
+        assert "&lt;script&gt;alert" in unsafe.text
+
+        valid = client.get(f"/sites/{site.id}/structure?depth=0&outcome=html")
+        assert valid.status_code == 200
+        assert "https://example.test/" in valid.text
+        assert "HTML-страница доступна" in valid.text
+
+
 def test_empty_missing_corrupt_and_escaped_states(tmp_path: Path):
     app, _ = build_app(tmp_path)
     with TestClient(app) as client:
