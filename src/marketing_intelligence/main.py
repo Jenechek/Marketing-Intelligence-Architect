@@ -67,6 +67,16 @@ from .crawl_settings import default_crawl_form, parse_crawl_settings
 from .crawler import CrawlSettings, Crawler
 from .logging_config import configure_logging
 from .models import Site
+from .site_structure import OUTCOME_TITLES, StructureDataError
+from .site_structure_filters import (
+    PAGES_PER_PAGE,
+    StructureFilterState,
+    filter_structure_pages,
+    parse_structure_filters,
+    structure_url,
+)
+from .site_structure_presentation import build_graph_view, safe_external_url
+from .site_structure_query import has_site_structure, load_site_structure
 from .sites import (
     ActiveSiteCrawlError,
     add_site,
@@ -374,6 +384,27 @@ def create_app(
             request=request,
             name="crawl_not_found.html",
             status_code=404,
+        )
+
+    def render_structure_error(
+        request: Request,
+        site: Site,
+        *,
+        title: str,
+        message: str,
+        status_code: int,
+        return_url: str | None = None,
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="site_structure_error.html",
+            context={
+                "site": site,
+                "title": title,
+                "message": message,
+                "return_url": return_url or f"/sites/{site.id}/structure",
+            },
+            status_code=status_code,
         )
 
     async def perform_crawl(run_id: int, site: Site, settings: CrawlSettings) -> None:
@@ -1176,6 +1207,149 @@ def create_app(
         task.add_done_callback(request.app.state.crawl_tasks.discard)
         return RedirectResponse(url=f"/crawl-runs/{run.id}", status_code=303)
 
+    @application.get("/sites/{site_id}/structure", response_class=HTMLResponse)
+    async def site_structure_screen(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        raw = {
+            "url": request.query_params.get("url", ""),
+            "depth": request.query_params.get("depth", ""),
+            "outcome": request.query_params.get("outcome", ""),
+            "broken": request.query_params.get("broken", ""),
+            "unchecked": request.query_params.get("unchecked", ""),
+            "page": request.query_params.get("page", "1"),
+        }
+        state, errors = parse_structure_filters(**raw)
+        try:
+            selected = load_site_structure(request.app.state.engine, site_id)
+        except StructureDataError as error:
+            request.app.state.logger.error("Карта структуры повреждена: %s", error)
+            return render_structure_error(
+                request,
+                site,
+                title="Карту нельзя показать",
+                message="Связанные данные выбранного обхода повреждены. Сохранённые данные не изменены.",
+                status_code=500,
+            )
+        if state is None:
+            state = StructureFilterState("", "", "", "", "", "1", None, None, None, None, 1)
+        filtered = filter_structure_pages(selected.structure.pages, state) if selected else ()
+        total_pages = max(1, (len(filtered) + PAGES_PER_PAGE - 1) // PAGES_PER_PAGE)
+        if not errors and filtered and state.page > total_pages:
+            errors["page"] = "Номер страницы выходит за пределы результатов."
+        page_number = min(state.page, total_pages)
+        offset = (page_number - 1) * PAGES_PER_PAGE
+        page_items = filtered[offset : offset + PAGES_PER_PAGE]
+        graph_view = None
+        graph_limited = len(filtered) > 100
+        filtered_edges = selected.structure.edges_for(filtered) if selected else ()
+        filtered_by_id = {item.record_id: item for item in filtered}
+        graph_edge_rows = tuple(
+            (filtered_by_id[edge.source_record_id], filtered_by_id[edge.target_record_id])
+            for edge in filtered_edges
+        )
+        if selected and filtered and not graph_limited:
+            graph_view = build_graph_view(filtered, filtered_edges)
+        return templates.TemplateResponse(
+            request=request,
+            name="site_structure.html",
+            context={
+                "site": site,
+                "selected": selected,
+                "state": state,
+                "form": raw,
+                "errors": errors,
+                "filtered": filtered,
+                "page_items": page_items,
+                "total_pages": total_pages,
+                "page_number": page_number,
+                "tree": selected.structure.tree_for(filtered) if selected else None,
+                "graph_view": graph_view,
+                "graph_edges": filtered_edges,
+                "graph_edge_rows": graph_edge_rows,
+                "graph_limited": graph_limited,
+                "outcome_titles": OUTCOME_TITLES,
+                "structure_url": structure_url,
+                "to_local_datetime": to_event_local_datetime,
+                "state_query": state.query(),
+            },
+            status_code=422 if errors else 200,
+        )
+
+    @application.get(
+        "/sites/{site_id}/structure/pages/{page_id}", response_class=HTMLResponse
+    )
+    async def site_structure_page_detail(
+        request: Request, site_id: int, page_id: int
+    ) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        raw = {
+            "url": request.query_params.get("url", ""),
+            "depth": request.query_params.get("depth", ""),
+            "outcome": request.query_params.get("outcome", ""),
+            "broken": request.query_params.get("broken", ""),
+            "unchecked": request.query_params.get("unchecked", ""),
+            "page": request.query_params.get("page", "1"),
+        }
+        state, errors = parse_structure_filters(**raw)
+        if state is None or errors:
+            return render_structure_error(
+                request,
+                site,
+                title="Параметры возврата неверны",
+                message="Откройте страницу заново из карты структуры.",
+                status_code=422,
+            )
+        try:
+            selected = load_site_structure(request.app.state.engine, site_id)
+        except StructureDataError as error:
+            request.app.state.logger.error("Подробности структуры повреждены: %s", error)
+            return render_structure_error(
+                request,
+                site,
+                title="Подробности нельзя показать",
+                message="Связанные данные выбранного обхода повреждены. Сохранённые данные не изменены.",
+                status_code=500,
+                return_url=structure_url(site_id, state),
+            )
+        if selected is None:
+            return render_structure_error(
+                request,
+                site,
+                title="Подходящий обход не найден",
+                message="Для карты нужен завершённый или частично завершённый обход.",
+                status_code=404,
+            )
+        page = selected.structure.page_by_id(page_id)
+        if page is None:
+            return render_structure_error(
+                request,
+                site,
+                title="Страница не найдена",
+                message="В выбранном обходе такой страницы нет.",
+                status_code=404,
+                return_url=structure_url(site_id, state),
+            )
+        by_id = {item.record_id: item for item in selected.structure.pages}
+        incoming = tuple(by_id[item] for item in page.incoming_record_ids)
+        return templates.TemplateResponse(
+            request=request,
+            name="site_structure_detail.html",
+            context={
+                "site": site,
+                "selected": selected,
+                "page": page,
+                "incoming": incoming,
+                "return_url": structure_url(site_id, state),
+                "state_query": state.query(),
+                "external_url": safe_external_url(page.url),
+                "to_local_datetime": to_event_local_datetime,
+            },
+        )
+
     @application.get("/crawl-runs/{run_id}", response_class=HTMLResponse)
     async def crawl_run_screen(request: Request, run_id: int) -> HTMLResponse:
         run = get_crawl_run(request.app.state.engine, run_id)
@@ -1197,6 +1371,10 @@ def create_app(
                 "to_local_datetime": to_local_datetime,
                 "status_title": crawl_status_title,
                 "error_outcome_title": crawl_error_outcome_title,
+                "has_structure": (
+                    run.status != RUNNING_STATUS
+                    and has_site_structure(request.app.state.engine, site.id)
+                ),
             },
         )
 

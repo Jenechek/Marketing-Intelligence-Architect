@@ -1,0 +1,110 @@
+{% macro detail_href(page_id) -%}
+/sites/{{ site.id }}/structure/pages/{{ page_id }}{% if state_query %}?{{ state_query }}{% endif %}
+{%- endmacro %}
+{% macro tree_nodes(nodes) %}
+<ul class="structure-tree">
+    {% for node in nodes %}
+    <li>
+        <a href="{{ detail_href(node.page.record_id) }}">{{ node.page.url }}</a>
+        <span class="tree-meta">Глубина {{ node.page.depth }} · {{ node.page.outcome_title }}</span>
+        {% if node.children %}{{ tree_nodes(node.children) }}{% endif %}
+    </li>
+    {% endfor %}
+</ul>
+{% endmacro %}
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Структура — {{ site.name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+<main class="page-shell structure-shell">
+    <header class="page-header">
+        <div><p class="eyebrow">Карта структуры сайта</p><h1>{{ site.name }}</h1><p class="lead break-text">{{ site.url }}</p></div>
+        <a class="secondary-action" href="/">К сайтам</a>
+    </header>
+
+    {% if errors %}
+    <section class="content-card" aria-labelledby="filter-errors-title">
+        <h2 id="filter-errors-title">Параметры фильтра указаны неверно</h2>
+        <div class="notice error" role="alert">
+            <p>Проверьте параметры фильтра.</p>
+            <ul>
+                {% for error in errors.values() %}<li>{{ error }}</li>{% endfor %}
+            </ul>
+        </div>
+    </section>
+    {% endif %}
+
+    {% if not selected %}
+    <section class="content-card empty-state"><h2>Подходящего обхода пока нет</h2><p>Карта появится после завершённого или частично завершённого полного обхода.</p><a class="primary-action" href="/sites/{{ site.id }}/crawl">Начать полный обход</a></section>
+    {% else %}
+    {% set completed_local = to_local_datetime(selected.run.completed_at) %}
+    <section class="content-card" aria-labelledby="source-title">
+        <div class="section-heading"><div><h2 id="source-title">Источник карты</h2><p>Данные только одного последнего пригодного запуска.</p></div><span class="status-badge">{% if selected.run.status == 'partial' %}Завершён частично{% else %}Завершён{% endif %}</span></div>
+        <dl class="summary-list">
+            <div><dt>Завершение</dt><dd><time datetime="{{ completed_local.isoformat() }}">{{ completed_local.strftime('%d.%m.%Y %H:%M:%S') }}</time></dd></div>
+            <div><dt>Статус</dt><dd>{% if selected.run.status == 'partial' %}Завершён частично{% else %}Завершён{% endif %}</dd></div>
+            <div><dt>Ограничение обхода</dt><dd>{% if selected.run.limited %}Достигнуто{% else %}Не достигнуто{% endif %}</dd></div>
+            <div><dt>Страниц</dt><dd>{{ selected.structure.pages|length }}</dd></div>
+        </dl>
+        {% if selected.run.status == 'partial' %}<div class="notice error" role="status">Карта может быть неполной: выбранный обход завершён частично.</div>{% endif %}
+        {% if selected.run.limited %}<div class="notice error" role="status">При обходе достигнуто ограничение. Часть внутренних ссылок могла остаться непроверенной.</div>{% endif %}
+    </section>
+
+    {% if not selected.structure.pages %}
+    <section class="content-card empty-state"><h2>В обходе нет страниц</h2><p>Запуск завершён без сохранённых обработанных URL.</p></section>
+    {% else %}
+    <section class="content-card" aria-labelledby="filters-title">
+        <div class="section-heading"><div><h2 id="filters-title">Фильтры</h2><p>Фильтры применяются к списку, дереву и графу.</p></div></div>
+        <form class="filter-form" method="get" action="/sites/{{ site.id }}/structure" novalidate>
+            <div class="filter-grid">
+                <div class="field"><label for="url">Подстрока URL</label><input id="url" name="url" value="{{ form.url }}" maxlength="2048" {% if errors.url %}aria-invalid="true" aria-describedby="url-error"{% endif %}>{% if errors.url %}<p class="field-error" id="url-error">{{ errors.url }}</p>{% endif %}</div>
+                <div class="field"><label for="depth">Глубина</label><input id="depth" name="depth" type="number" min="0" step="1" value="{{ form.depth }}" {% if errors.depth %}aria-invalid="true" aria-describedby="depth-error"{% endif %}>{% if errors.depth %}<p class="field-error" id="depth-error">{{ errors.depth }}</p>{% endif %}</div>
+                <div class="field"><label for="outcome">Результат обработки</label><select id="outcome" name="outcome" {% if errors.outcome %}aria-invalid="true" aria-describedby="outcome-error"{% endif %}><option value="">Все</option>{% for value, title in outcome_titles.items() %}<option value="{{ value }}" {% if form.outcome == value %}selected{% endif %}>{{ title }}</option>{% endfor %}</select>{% if errors.outcome %}<p class="field-error" id="outcome-error">{{ errors.outcome }}</p>{% endif %}</div>
+                <div class="field"><label for="broken">Битые исходящие</label><select id="broken" name="broken" {% if errors.broken %}aria-invalid="true" aria-describedby="broken-error"{% endif %}><option value="">Все</option><option value="yes" {% if form.broken == 'yes' %}selected{% endif %}>Есть</option><option value="no" {% if form.broken == 'no' %}selected{% endif %}>Нет</option></select>{% if errors.broken %}<p class="field-error" id="broken-error">{{ errors.broken }}</p>{% endif %}</div>
+                <div class="field"><label for="unchecked">Непроверенные исходящие</label><select id="unchecked" name="unchecked" {% if errors.unchecked %}aria-invalid="true" aria-describedby="unchecked-error"{% endif %}><option value="">Все</option><option value="yes" {% if form.unchecked == 'yes' %}selected{% endif %}>Есть</option><option value="no" {% if form.unchecked == 'no' %}selected{% endif %}>Нет</option></select>{% if errors.unchecked %}<p class="field-error" id="unchecked-error">{{ errors.unchecked }}</p>{% endif %}</div>
+            </div>
+            {% if errors.page %}<p class="field-error">{{ errors.page }}</p>{% endif %}
+            <div class="form-actions"><button class="primary-action" type="submit">Применить</button>{% if state.has_filters %}<a class="secondary-action" href="/sites/{{ site.id }}/structure">Сбросить</a>{% endif %}</div>
+        </form>
+    </section>
+
+    {% if not filtered %}
+    <section class="content-card empty-state"><h2>По фильтру ничего не найдено</h2><p>Измените или сбросьте условия поиска.</p></section>
+    {% else %}
+    <section class="content-card" aria-labelledby="list-title">
+        <div class="section-heading"><div><h2 id="list-title">Страницы</h2><p>Результаты упорядочены по порядку обхода.</p></div><span class="count">{{ filtered|length }}</span></div>
+        <div class="table-scroll"><table class="structure-table"><thead><tr><th>URL</th><th>Глубина</th><th>Результат</th><th>Входящие</th><th>Исходящие</th><th>Битые</th><th>Не проверены</th></tr></thead><tbody>
+            {% for item in page_items %}<tr><td><a href="{{ detail_href(item.record_id) }}">{{ item.url }}</a></td><td>{{ item.depth }}</td><td>{{ item.outcome_title }}{% if item.http_status is not none %} (HTTP {{ item.http_status }}){% endif %}</td><td>{{ item.incoming_count }}</td><td>{{ item.outgoing_count }}</td><td>{{ item.broken_outgoing_count }}</td><td>{{ item.unchecked_outgoing_count }}</td></tr>{% endfor %}
+        </tbody></table></div>
+        {% if total_pages > 1 %}<nav class="pagination" aria-label="Страницы списка"><span>Страница {{ page_number }} из {{ total_pages }}</span><div class="form-actions">{% if page_number > 1 %}<a class="secondary-action" href="{{ structure_url(site.id, state, page=page_number - 1) }}">Назад</a>{% endif %}{% if page_number < total_pages %}<a class="secondary-action" href="{{ structure_url(site.id, state, page=page_number + 1) }}">Далее</a>{% endif %}</div></nav>{% endif %}
+    </section>
+
+    <section class="content-card" aria-labelledby="tree-title">
+        <div class="section-heading"><div><h2 id="tree-title">Дерево страниц</h2><p>Основной родитель — первая по порядку обхода отобранная страница со ссылкой на дочернюю.</p></div></div>
+        {{ tree_nodes(tree.roots) }}
+        {% if tree.orphan_roots %}<h3>Страницы без определяемого родителя</h3>{{ tree_nodes(tree.orphan_roots) }}{% endif %}
+    </section>
+
+    <section class="content-card" aria-labelledby="graph-title">
+        <div class="section-heading"><div><h2 id="graph-title">Граф внутренних ссылок</h2><p>Узлы — отобранные страницы, связи — ссылки между ними.</p></div></div>
+        {% if graph_limited %}<div class="notice error" role="status">Отобрано {{ filtered|length }} узлов. Граф показывает не более 100 узлов: сначала примените более узкий фильтр.</div>
+        {% elif graph_view %}
+        <div class="graph-scroll"><svg class="structure-graph" viewBox="0 0 900 660" role="img" aria-labelledby="graph-svg-title graph-svg-desc"><title id="graph-svg-title">Граф внутренних ссылок</title><desc id="graph-svg-desc">{{ graph_view.nodes|length }} узлов и {{ graph_edges|length }} связей. Полные данные приведены в таблицах ниже.</desc>
+            {% for line in graph_view.lines %}<line x1="{{ line.x1 }}" y1="{{ line.y1 }}" x2="{{ line.x2 }}" y2="{{ line.y2 }}"><title>Связь {{ line.source_number }} → {{ line.target_number }}</title></line>{% endfor %}
+            {% for node in graph_view.nodes %}<a href="{{ detail_href(node.record_id) }}"><circle cx="{{ node.x }}" cy="{{ node.y }}" r="15"></circle><text x="{{ node.x }}" y="{{ node.y + 5 }}">{{ node.number }}</text><title>{{ node.number }}. {{ node.url }}</title></a>{% endfor %}
+        </svg></div>
+        <h3>Узлы</h3><ol class="graph-node-list">{% for node in graph_view.nodes %}<li><a href="{{ detail_href(node.record_id) }}">{{ node.url }}</a></li>{% endfor %}</ol>
+        <h3>Связи</h3>{% if graph_edge_rows %}<div class="table-scroll"><table class="structure-table"><thead><tr><th>Источник</th><th>Цель</th></tr></thead><tbody>{% for source, target in graph_edge_rows %}<tr><td>{{ source.url }}</td><td>{{ target.url }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<p>Между отобранными страницами связей нет.</p>{% endif %}
+        {% endif %}
+    </section>
+    {% endif %}
+    {% endif %}
+    {% endif %}
+</main>
+</body>
+</html>

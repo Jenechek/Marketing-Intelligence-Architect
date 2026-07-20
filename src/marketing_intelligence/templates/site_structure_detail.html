@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Страница структуры — {{ site.name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+<main class="page-shell structure-shell">
+    <header class="page-header"><div><p class="eyebrow">Подробности страницы</p><h1>{{ site.name }}</h1><p class="lead break-text">{{ page.url }}</p></div><a class="secondary-action" href="{{ return_url }}">Вернуться к карте</a></header>
+    {% if selected.run.status == 'partial' %}<div class="notice error" role="status">Карта может быть неполной: выбранный обход завершён частично.</div>{% endif %}
+    <section class="content-card" aria-labelledby="page-title">
+        <div class="section-heading"><div><h2 id="page-title">Страница</h2><p>{{ page.outcome_title }}</p></div>{% if external_url %}<a class="secondary-action" href="{{ external_url }}" target="_blank" rel="noopener noreferrer">Открыть URL</a>{% endif %}</div>
+        <dl class="summary-list">
+            {% set completed_local = to_local_datetime(selected.run.completed_at) %}
+            <div><dt>Сайт</dt><dd>{{ site.name }}</dd></div>
+            <div><dt>Выбранный обход</dt><dd>№ {{ selected.run.id }}, {{ completed_local.strftime('%d.%m.%Y %H:%M:%S') }}, {% if selected.run.status == 'partial' %}завершён частично{% else %}завершён{% endif %}</dd></div>
+            <div><dt>URL</dt><dd class="technical-value">{{ page.url }}</dd></div>
+            <div><dt>Глубина</dt><dd>{{ page.depth }}</dd></div>
+            <div><dt>Результат</dt><dd>{{ page.outcome_title }}</dd></div>
+            {% if page.http_status is not none %}<div><dt>HTTP-код</dt><dd>{{ page.http_status }}</dd></div>{% endif %}
+            <div><dt>Входящих страниц</dt><dd>{{ page.incoming_count }}</dd></div>
+            <div><dt>Исходящих внутренних ссылок</dt><dd>{{ page.outgoing_count }}</dd></div>
+            <div><dt>Битых исходящих</dt><dd>{{ page.broken_outgoing_count }}</dd></div>
+            <div><dt>Не проверенных исходящих</dt><dd>{{ page.unchecked_outgoing_count }}</dd></div>
+        </dl>
+        <details class="technical-settings"><summary>Фактическое сообщение обработки</summary><p class="break-text">{{ page.message }}</p></details>
+    </section>
+    <section class="content-card" aria-labelledby="incoming-title"><div class="section-heading"><h2 id="incoming-title">Входящие страницы</h2><span class="count">{{ incoming|length }}</span></div>{% if incoming %}<ul class="link-detail-list">{% for source in incoming %}<li><a href="/sites/{{ site.id }}/structure/pages/{{ source.record_id }}{% if state_query %}?{{ state_query }}{% endif %}">{{ source.url }}</a></li>{% endfor %}</ul>{% else %}<p>Сохранённых страниц-источников нет.</p>{% endif %}</section>
+    <section class="content-card" aria-labelledby="outgoing-title"><div class="section-heading"><h2 id="outgoing-title">Исходящие внутренние ссылки</h2><span class="count">{{ page.outgoing|length }}</span></div>{% if page.outgoing %}<ul class="link-detail-list">{% for link in page.outgoing %}<li><div>{% if link.target_record_id %}<a href="/sites/{{ site.id }}/structure/pages/{{ link.target_record_id }}{% if state_query %}?{{ state_query }}{% endif %}">{{ link.url }}</a>{% else %}<span class="break-text">{{ link.url }}</span>{% endif %}<strong>{{ link.state_title }}{% if link.http_status is not none %} (HTTP {{ link.http_status }}){% endif %}</strong></div></li>{% endfor %}</ul>{% else %}<p>В сохранённом снимке исходящих внутренних ссылок нет.</p>{% endif %}</section>
+    <a class="secondary-action" href="{{ return_url }}">Вернуться к сохранённому состоянию карты</a>
+</main>
+</body>
+</html>
