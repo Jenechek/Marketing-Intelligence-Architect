@@ -12,6 +12,7 @@ from sqlmodel import Session, select
 from .change_event import ChangeEventType, HistoryEventType, PriceChangeEventType
 from .change_importance import ChangeImportance
 from .models import (
+    ChangeEventViewState,
     CrawlPageRecord,
     CrawlPagePriceRecord,
     CrawlPageSnapshot,
@@ -64,6 +65,7 @@ class ChangeEventDetail:
     previous: SnapshotValues | PriceValues | None
     text_distance: int | None
     change_ratio: Fraction | None
+    viewed_at: datetime | None
 
 
 def load_change_event(
@@ -113,6 +115,7 @@ def load_change_event(
         event_type = _event_type(event)
         _validate_sides(event.id, event_type, current, previous)
         ratio = _change_ratio(event)
+        viewed_at = _load_viewed_at(session, "snapshot", event.id)
 
     return ChangeEventDetail(
         event_id=event.id,
@@ -127,6 +130,7 @@ def load_change_event(
         previous=previous,
         text_distance=event.text_distance,
         change_ratio=ratio,
+        viewed_at=viewed_at,
     )
 
 
@@ -160,6 +164,7 @@ def _load_price_change_event(
             raise ChangeEventDataError(
                 f"Ценовые значения события {event.id} не соответствуют сохранённому профилю."
             )
+        viewed_at = _load_viewed_at(session, "price", event.id)
     return ChangeEventDetail(
         event_id=event.id,
         event_type=PriceChangeEventType.PRICE_CHANGED,
@@ -173,7 +178,20 @@ def _load_price_change_event(
         previous=previous,
         text_distance=None,
         change_ratio=None,
+        viewed_at=viewed_at,
     )
+
+
+def _load_viewed_at(session: Session, source: str, event_id: int) -> datetime | None:
+    field = (
+        ChangeEventViewState.snapshot_change_event_id
+        if source == "snapshot"
+        else ChangeEventViewState.price_change_event_id
+    )
+    value = session.exec(
+        select(ChangeEventViewState.viewed_at).where(field == event_id)
+    ).first()
+    return _as_utc(value) if value is not None else None
 
 
 def _load_price_side(

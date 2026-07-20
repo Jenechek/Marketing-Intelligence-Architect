@@ -2,12 +2,18 @@
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
+from enum import Enum
 from urllib.parse import urlencode
 
 from .change_event import ChangeEventType, HistoryEventType, PriceChangeEventType
 
 
 EVENTS_PER_PAGE = 20
+
+
+class ViewStatusFilter(str, Enum):
+    UNVIEWED = "unviewed"
+    VIEWED = "viewed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,10 +26,12 @@ class ChangeEventListState:
     date_from_value: str
     date_to_value: str
     page_value: str
+    view_status_value: str
     event_type: HistoryEventType | None
     from_time: datetime | None
     before_time: datetime | None
     page: int
+    viewed: bool | None
 
     @property
     def has_filters(self) -> bool:
@@ -31,6 +39,7 @@ class ChangeEventListState:
             self.event_type_value
             or self.date_from_value
             or self.date_to_value
+            or self.view_status_value
         )
 
     def query(self, *, page: int | None = None) -> str:
@@ -45,6 +54,8 @@ class ChangeEventListState:
             values.append(("date_from", self.date_from_value))
         if self.date_to_value:
             values.append(("date_to", self.date_to_value))
+        if self.view_status_value:
+            values.append(("view_status", self.view_status_value))
         target_page = self.page if page is None else page
         if target_page != 1:
             values.append(("page", str(target_page)))
@@ -58,6 +69,7 @@ class ChangeEventListForm:
     date_from: str
     date_to: str
     page: str
+    view_status: str = ""
 
 
 def parse_change_event_list_state(
@@ -67,6 +79,7 @@ def parse_change_event_list_state(
     date_from: str,
     date_to: str,
     page: str,
+    view_status: str = "",
     local_timezone: tzinfo | None = None,
 ) -> tuple[ChangeEventListState | None, dict[str, str]]:
     """Проверить GET-параметры и перевести границы локальных дат в UTC."""
@@ -90,6 +103,13 @@ def parse_change_event_list_state(
             )
         except ValueError:
             errors["event_type"] = "Выберите один из доступных типов события."
+
+    viewed: bool | None = None
+    if view_status:
+        try:
+            viewed = ViewStatusFilter(view_status) is ViewStatusFilter.VIEWED
+        except ValueError:
+            errors["view_status"] = "Выберите один из доступных статусов просмотра."
 
     parsed_from = _parse_date(date_from, "date_from", "Дата «с» указана неверно.", errors)
     parsed_to = _parse_date(date_to, "date_to", "Дата «по» указана неверно.", errors)
@@ -126,10 +146,12 @@ def parse_change_event_list_state(
             date_from_value=date_from,
             date_to_value=date_to,
             page_value=page,
+            view_status_value=view_status,
             event_type=parsed_type,
             from_time=from_time,
             before_time=before_time,
             page=parsed_page,
+            viewed=viewed,
         ),
         {},
     )

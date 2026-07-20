@@ -24,6 +24,7 @@
             {% if errors.page %}<p>Получено: {{ form.page }}</p>{% endif %}
         </div>
         {% endif %}
+        {% if view_state_changed %}<div class="notice success" role="status">Статус просмотра сохранён.</div>{% endif %}
 
         {% if not sites %}
         <section class="content-card empty-state" aria-labelledby="no-sites-title">
@@ -52,6 +53,15 @@
                         {% for item in event_types %}<option value="{{ item.value }}" {% if form.event_type == item.value %}selected{% endif %}>{{ event_type_title(item) }}</option>{% endfor %}
                     </select>
                     {% if errors.event_type %}<p class="field-error" id="event-type-error">{{ errors.event_type }}</p>{% endif %}
+                </div>
+                <div class="field">
+                    <label for="view_status">Статус просмотра</label>
+                    <select id="view_status" name="view_status" {% if errors.view_status %}aria-invalid="true"{% endif %}>
+                        <option value="">Все</option>
+                        <option value="unviewed" {% if form.view_status == 'unviewed' %}selected{% endif %}>Непросмотренные</option>
+                        <option value="viewed" {% if form.view_status == 'viewed' %}selected{% endif %}>Просмотренные</option>
+                    </select>
+                    {% if errors.view_status %}<p class="field-error">{{ errors.view_status }}</p>{% endif %}
                 </div>
                 <div class="date-fields">
                     <div class="field">
@@ -82,6 +92,10 @@
                 </div>
                 <span class="count" aria-label="Найдено событий">{{ event_page.total_count }}</span>
             </div>
+            <div class="form-actions" aria-label="Экспорт всей отфильтрованной истории">
+                <a class="secondary-action" href="{{ json_export_url }}">Скачать всю выборку в JSON</a>
+                <a class="secondary-action" href="{{ csv_export_url }}">Скачать всю выборку в CSV</a>
+            </div>
             {% if event_page.items %}
             <ol class="event-list" start="{{ event_page.offset + 1 }}">
                 {% for event in event_page.items %}
@@ -89,10 +103,27 @@
                     <div>
                         <strong>{{ event.site_name }} — {{ event_type_title(event.event_type) }}</strong>
                         <p class="event-meta">Важность: {{ importance_title(event.importance) }} · {{ to_local_datetime(event.current_completed_at) }}</p>
+                        <p>Статус: {{ 'Просмотрено' if event.is_viewed else 'Не просмотрено' }}{% if event.viewed_at %} · {{ to_local_datetime(event.viewed_at) }}{% endif %}</p>
                         <p>{{ event_explanation(event.event_type) }}</p>
                         <p class="break-text">{{ event.url }}</p>
                     </div>
-                    <a class="secondary-action" href="{{ detail_url(event) }}">Подробнее</a>
+                    <div>
+                        <a class="secondary-action" href="{{ detail_url(event) }}">Подробнее</a>
+                        <form method="post" action="/sites/{{ event.site_id }}/changes/{{ event.event_id }}/view-state">
+                            <input type="hidden" name="source" value="{{ event.source }}">
+                            <input type="hidden" name="action" value="{{ 'unview' if event.is_viewed else 'view' }}">
+                            <input type="hidden" name="action_token" value="{{ view_token(event) }}">
+                            <input type="hidden" name="scope" value="all">
+                            <input type="hidden" name="return_area" value="list">
+                            <input type="hidden" name="site_id" value="{{ state.site_id_value }}">
+                            <input type="hidden" name="event_type" value="{{ state.event_type_value }}">
+                            <input type="hidden" name="date_from" value="{{ state.date_from_value }}">
+                            <input type="hidden" name="date_to" value="{{ state.date_to_value }}">
+                            <input type="hidden" name="view_status" value="{{ state.view_status_value }}">
+                            <input type="hidden" name="page" value="{{ state.page }}">
+                            <button class="secondary-action" type="submit">{{ 'Вернуть в непросмотренные' if event.is_viewed else 'Отметить просмотренным' }}</button>
+                        </form>
+                    </div>
                 </li>
                 {% endfor %}
             </ol>

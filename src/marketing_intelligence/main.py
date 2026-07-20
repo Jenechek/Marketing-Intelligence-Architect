@@ -8,7 +8,7 @@ import secrets
 from urllib.parse import parse_qs
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -22,6 +22,7 @@ from .check_history import (
     to_local_datetime,
 )
 from .change_event_detail import ChangeEventDataError, load_change_event
+from .change_event_export import prepare_change_event_export
 from .change_event import HISTORY_EVENT_TYPES
 from .change_event_filters import (
     EVENTS_PER_PAGE,
@@ -37,9 +38,11 @@ from .change_event_presentation import (
     present_sides,
 )
 from .change_event_query import load_change_events
+from .change_event_view_state import set_change_event_viewed
 from .confirmation import (
     CHECK_AVAILABILITY_ACTION,
     START_CRAWL_ACTION,
+    change_event_view_action,
     create_action_token,
     create_delete_confirmation_token,
     validate_delete_confirmation_token,
@@ -228,6 +231,57 @@ def create_app(
             target_timezone=active_settings.local_timezone,
         )
 
+    def view_state_token(
+        request: Request,
+        site_id: int,
+        source: str,
+        event_id: int,
+        viewed: bool,
+    ) -> str:
+        return create_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            change_event_view_action(source, event_id, viewed),
+        )
+
+    def prepare_export_response(
+        request: Request,
+        format_name: str,
+        state,
+        *,
+        site_id: int | None = None,
+    ):
+        try:
+            prepared = prepare_change_event_export(
+                request.app.state.engine,
+                format_name=format_name,
+                site_id=state.site_id if site_id is None else site_id,
+                event_types=(state.event_type,) if state.event_type else None,
+                from_time=state.from_time,
+                before_time=state.before_time,
+                viewed=state.viewed,
+                local_timezone=active_settings.local_timezone,
+            )
+        except (ChangeEventDataError, ValueError) as error:
+            request.app.state.logger.error("Экспорт истории не подготовлен: %s", error)
+            return render_change_event_error(
+                request,
+                state.site_id if site_id is None else site_id,
+                title="Экспорт нельзя подготовить",
+                message=(
+                    "Файл не создан: часть связанных данных повреждена. "
+                    "Сохранённая история не изменена."
+                ),
+                status_code=500,
+            )
+        return StreamingResponse(
+            prepared.chunks(),
+            media_type=prepared.media_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{prepared.filename}"',
+            },
+        )
+
     def render_delete_forbidden(request: Request, site: Site) -> HTMLResponse:
         return templates.TemplateResponse(
             request=request,
@@ -357,12 +411,14 @@ def create_app(
             date_from=request.query_params.get("date_from", ""),
             date_to=request.query_params.get("date_to", ""),
             page=request.query_params.get("page", "1"),
+            view_status=request.query_params.get("view_status", ""),
         )
         state, errors = parse_change_event_list_state(
             event_type=form.event_type,
             date_from=form.date_from,
             date_to=form.date_to,
             page=form.page,
+            view_status=form.view_status,
             local_timezone=active_settings.local_timezone,
         )
         if state is None:
@@ -388,6 +444,7 @@ def create_app(
                 event_types=(state.event_type,) if state.event_type else None,
                 from_time=state.from_time,
                 before_time=state.before_time,
+                viewed=state.viewed,
                 limit=EVENTS_PER_PAGE,
                 offset=query_offset,
             )
@@ -401,16 +458,7 @@ def create_app(
                     return_url=change_event_list_url(site_id, state, page=1),
                     action_label="К первой странице",
                 )
-            has_any_history = bool(event_page.total_count)
-            if state.has_filters and not has_any_history:
-                has_any_history = bool(
-                    load_change_events(
-                        request.app.state.engine,
-                        site_id=site_id,
-                        limit=1,
-                        offset=0,
-                    ).total_count
-                )
+            has_any_history = bool(event_page.total_count) or state.has_filters
         except ValueError as error:
             request.app.state.logger.error(
                 "Повреждён список событий сайта %s: %s",
@@ -465,7 +513,58 @@ def create_app(
                 "event_explanation": event_explanation,
                 "importance_title": importance_title,
                 "to_local_datetime": to_event_local_datetime,
+                "view_token": lambda event: view_state_token(
+                    request,
+                    site_id,
+                    event.source,
+                    event.event_id,
+                    not event.is_viewed,
+                ),
+                "view_state_changed": request.query_params.get("view_state_changed") == "1",
+                "json_export_url": f"/sites/{site_id}/changes/export.json"
+                + (f"?{state.query(page=1)}" if state.query(page=1) else ""),
+                "csv_export_url": f"/sites/{site_id}/changes/export.csv"
+                + (f"?{state.query(page=1)}" if state.query(page=1) else ""),
             },
+        )
+
+    @application.get("/sites/{site_id}/changes/export.{format_name}")
+    async def site_change_events_export(
+        request: Request,
+        site_id: int,
+        format_name: str,
+    ):
+        if format_name not in {"json", "csv"}:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Формат экспорта не найден",
+                message="Доступен экспорт только в JSON или CSV.",
+                status_code=404,
+            )
+        if get_site(request.app.state.engine, site_id) is None:
+            return render_site_not_found(request)
+        state, errors = parse_change_event_list_state(
+            event_type=request.query_params.get("event_type", ""),
+            date_from=request.query_params.get("date_from", ""),
+            date_to=request.query_params.get("date_to", ""),
+            page=request.query_params.get("page", "1"),
+            view_status=request.query_params.get("view_status", ""),
+            local_timezone=active_settings.local_timezone,
+        )
+        if state is None:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Фильтры экспорта указаны неверно",
+                message=" ".join(errors.values()),
+                status_code=422,
+            )
+        return prepare_export_response(
+            request,
+            format_name,
+            state,
+            site_id=site_id,
         )
 
     @application.get("/changes", response_class=HTMLResponse)
@@ -477,6 +576,7 @@ def create_app(
             date_from=request.query_params.get("date_from", ""),
             date_to=request.query_params.get("date_to", ""),
             page=request.query_params.get("page", "1"),
+            view_status=request.query_params.get("view_status", ""),
         )
         state, errors = parse_change_event_list_state(
             site_id=form.site_id,
@@ -484,6 +584,7 @@ def create_app(
             date_from=form.date_from,
             date_to=form.date_to,
             page=form.page,
+            view_status=form.view_status,
             local_timezone=active_settings.local_timezone,
         )
         status_code = 422 if errors else 200
@@ -519,6 +620,7 @@ def create_app(
                 event_types=(state.event_type,) if state.event_type else None,
                 from_time=state.from_time,
                 before_time=state.before_time,
+                viewed=state.viewed,
                 limit=EVENTS_PER_PAGE,
                 offset=query_offset,
             )
@@ -535,16 +637,7 @@ def create_app(
                     return_url=global_change_event_list_url(state, page=1),
                     action_label="К первой странице",
                 )
-            has_any_history = bool(event_page.total_count)
-            if state.has_filters or state.site_id is not None:
-                if not has_any_history:
-                    has_any_history = bool(
-                        load_change_events(
-                            request.app.state.engine,
-                            limit=1,
-                            offset=0,
-                        ).total_count
-                    )
+            has_any_history = bool(event_page.total_count) or state.has_filters or state.site_id is not None
         except ValueError as error:
             request.app.state.logger.error(
                 "Повреждён общий список событий: %s",
@@ -591,8 +684,57 @@ def create_app(
                     f"/sites/{event.site_id}/changes/{event.event_id}{detail_suffix}"
                     + ("&source=price" if event.source == "price" else "")
                 ),
+                "view_token": lambda event: view_state_token(
+                    request,
+                    event.site_id,
+                    event.source,
+                    event.event_id,
+                    not event.is_viewed,
+                ),
+                "view_state_changed": request.query_params.get("view_state_changed") == "1",
+                "json_export_url": "/changes/export.json"
+                + (f"?{state.query(page=1)}" if state.query(page=1) else ""),
+                "csv_export_url": "/changes/export.csv"
+                + (f"?{state.query(page=1)}" if state.query(page=1) else ""),
             },
         )
+
+    @application.get("/changes/export.{format_name}")
+    async def global_change_events_export(request: Request, format_name: str):
+        if format_name not in {"json", "csv"}:
+            return render_change_event_error(
+                request,
+                None,
+                title="Формат экспорта не найден",
+                message="Доступен экспорт только в JSON или CSV.",
+                status_code=404,
+            )
+        state, errors = parse_change_event_list_state(
+            site_id=request.query_params.get("site_id", ""),
+            event_type=request.query_params.get("event_type", ""),
+            date_from=request.query_params.get("date_from", ""),
+            date_to=request.query_params.get("date_to", ""),
+            page=request.query_params.get("page", "1"),
+            view_status=request.query_params.get("view_status", ""),
+            local_timezone=active_settings.local_timezone,
+        )
+        if state is None:
+            return render_change_event_error(
+                request,
+                None,
+                title="Фильтры экспорта указаны неверно",
+                message=" ".join(errors.values()),
+                status_code=422,
+            )
+        if state.site_id is not None and get_site(request.app.state.engine, state.site_id) is None:
+            return render_change_event_error(
+                request,
+                None,
+                title="Сайт не найден",
+                message="Выбранный сайт не существует.",
+                status_code=404,
+            )
+        return prepare_export_response(request, format_name, state)
 
     @application.get(
         "/sites/{site_id}/changes/{event_id}",
@@ -621,6 +763,7 @@ def create_app(
             date_from=request.query_params.get("date_from", ""),
             date_to=request.query_params.get("date_to", ""),
             page=request.query_params.get("page", "1"),
+            view_status=request.query_params.get("view_status", ""),
             local_timezone=active_settings.local_timezone,
         )
         if state is None:
@@ -702,7 +845,143 @@ def create_app(
                 "event_explanation": event_explanation,
                 "to_local_datetime": to_event_local_datetime,
                 "return_url": return_url,
+                "state": state,
+                "scope": scope,
+                "source": source,
+                "view_token": view_state_token(
+                    request,
+                    site_id,
+                    source,
+                    event_id,
+                    detail.viewed_at is None,
+                ),
+                "view_state_changed": request.query_params.get("view_state_changed") == "1",
             },
+        )
+
+    @application.post(
+        "/sites/{site_id}/changes/{event_id}/view-state",
+        response_class=HTMLResponse,
+    )
+    async def change_event_view_state(
+        request: Request,
+        site_id: int,
+        event_id: int,
+    ) -> HTMLResponse:
+        if event_id < 1:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Действие не выполнено",
+                message="Идентификатор события указан неверно.",
+                status_code=422,
+            )
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        body = await request.body()
+        if len(body) > 16 * 1024:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Действие не выполнено",
+                message="Данные формы слишком велики.",
+                status_code=413,
+            )
+        raw_form = parse_qs(
+            body.decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        value = lambda name, default="": raw_form.get(name, [default])[0]
+        source = value("source")
+        action = value("action")
+        scope = value("scope")
+        return_area = value("return_area")
+        if source not in {"snapshot", "price"} or action not in {"view", "unview"}:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Действие не выполнено",
+                message="Источник или действие указаны неверно.",
+                status_code=422,
+            )
+        if scope not in {"", "all"} or return_area not in {"list", "detail"}:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Действие не выполнено",
+                message="Область возврата указана неверно.",
+                status_code=422,
+            )
+        state, errors = parse_change_event_list_state(
+            site_id=value("site_id") if scope == "all" else "",
+            event_type=value("event_type"),
+            date_from=value("date_from"),
+            date_to=value("date_to"),
+            page=value("page", "1"),
+            view_status=value("view_status"),
+            local_timezone=active_settings.local_timezone,
+        )
+        if state is None or (scope == "all" and state.site_id not in {None, site_id}):
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Действие не выполнено",
+                message="Параметры возврата указаны неверно.",
+                status_code=422,
+            )
+        list_url = (
+            global_change_event_list_url(state)
+            if scope == "all"
+            else change_event_list_url(site_id, state)
+        )
+        detail_parts = []
+        if scope == "all":
+            detail_parts.append("scope=all")
+        if source == "price":
+            detail_parts.append("source=price")
+        state_query = state.query()
+        if state_query:
+            detail_parts.append(state_query)
+        detail_url = f"/sites/{site_id}/changes/{event_id}"
+        if detail_parts:
+            detail_url += "?" + "&".join(detail_parts)
+        return_url = detail_url if return_area == "detail" else list_url
+        viewed = action == "view"
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            change_event_view_action(source, event_id, viewed),
+            value("action_token"),
+        ):
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Действие запрещено",
+                message="Подтверждение действия недействительно. Обновите страницу и повторите.",
+                status_code=403,
+                return_url=return_url,
+            )
+        result = set_change_event_viewed(
+            request.app.state.engine,
+            site_id=site_id,
+            source=source,
+            event_id=event_id,
+            viewed=viewed,
+        )
+        if not result.found:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Событие не найдено",
+                message="В этом сайте такого события нет.",
+                status_code=404,
+                return_url=list_url,
+            )
+        separator = "&" if "?" in return_url else "?"
+        return RedirectResponse(
+            url=f"{return_url}{separator}view_state_changed=1",
+            status_code=303,
         )
 
     @application.post("/sites/{site_id}/edit", response_class=HTMLResponse)
