@@ -175,6 +175,26 @@ input[aria-invalid="true"], select[aria-invalid="true"] { border-color: #b83b3b;
 .event-list p { margin: 6px 0 0; }
 .event-meta { color: #52617a; }
 .filter-form { max-width: none; }
+.structure-shell { max-width: 1240px; }
+.filter-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0 18px; }
+.table-scroll, .graph-scroll { width: 100%; overflow: auto; }
+.structure-table { width: 100%; border-collapse: collapse; }
+.structure-table th, .structure-table td { padding: 11px 10px; border-bottom: 1px solid #e4e9f0; text-align: left; vertical-align: top; }
+.structure-table th { color: #536273; font-size: 0.9rem; }
+.structure-table td:first-child { min-width: 260px; overflow-wrap: anywhere; }
+.structure-tree { margin: 10px 0 18px; padding-left: 26px; }
+.structure-tree li { margin: 8px 0; overflow-wrap: anywhere; }
+.tree-meta { display: block; color: #52617a; font-size: 0.9rem; }
+.structure-graph { min-width: 760px; border: 1px solid #dbe3ef; border-radius: 12px; background: #fbfcfe; }
+.structure-graph line { stroke: #8797ad; stroke-width: 1.5; }
+.structure-graph circle { fill: #2356a8; stroke: #fff; stroke-width: 3; }
+.structure-graph text { fill: #fff; font-size: 11px; font-weight: 700; text-anchor: middle; pointer-events: none; }
+.structure-graph a:focus circle { stroke: #ef9d2d; stroke-width: 6; }
+.graph-node-list { columns: 2; }
+.graph-node-list li { margin-bottom: 7px; overflow-wrap: anywhere; }
+.link-detail-list { margin: 18px 0 0; padding: 0; list-style: none; }
+.link-detail-list li { padding: 12px 0; border-top: 1px solid #e5eaf2; overflow-wrap: anywhere; }
+.link-detail-list strong { display: block; margin-top: 5px; color: #52617a; }
 .date-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 22px; border-top: 1px solid #e5eaf2; }
 .comparison { margin-top: 20px; }
@@ -197,6 +217,8 @@ input[aria-invalid="true"], select[aria-invalid="true"] { border-color: #b83b3b;
     .site-actions { flex-wrap: wrap; }
     .event-list li { align-items: flex-start; flex-direction: column; }
     .date-fields { grid-template-columns: 1fr; gap: 0; }
+    .filter-grid { grid-template-columns: 1fr; gap: 0; }
+    .graph-node-list { columns: 1; }
     .danger-zone { align-items: flex-start; flex-direction: column; }
     .history-item summary { align-items: flex-start; flex-direction: column; gap: 6px; }
 }
