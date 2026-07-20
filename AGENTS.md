@@ -85,6 +85,10 @@ When defining tasks, prefer the largest coherent scope that combines closely rel
 
 Maintaining Codex effectiveness is mandatory. Never enlarge a task if doing so makes requirements less clear, increases context switching or rework, obscures failure isolation, weakens testing or review, raises data risk, or slows delivery of a verified result. Split the task as soon as any of these effects is expected; task volume is useful only while implementation and verification efficiency do not deteriorate.
 
+Every task or correction prepared for the separate working Codex chat must be delivered as one complete fenced code block labeled `markdown`, so the user can copy the whole handoff in one action. Keep the task title, repository, exact base and branch, sources to read, scope or correction, exclusions, checks, workflow constraints, and required response format inside that single block.
+
+Outside that block, write only a brief managerial note. Do not split the working Codex handoff across prose, blockquotes, or multiple code blocks.
+
 Tasks must follow the approved order. Do not begin the next task before the current one is implemented, verified, documented, and accepted. Record blockers in `TASKS.md` rather than skipping ahead.
 
 ## Token-efficient operation
