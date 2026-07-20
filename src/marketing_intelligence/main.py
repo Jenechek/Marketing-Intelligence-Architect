@@ -37,7 +37,7 @@ from .change_event_presentation import (
     importance_title,
     present_sides,
 )
-from .change_event_query import load_change_events
+from .change_event_query import has_change_events, load_change_events
 from .change_event_view_state import set_change_event_viewed
 from .confirmation import (
     CHECK_AVAILABILITY_ACTION,
@@ -458,7 +458,12 @@ def create_app(
                     return_url=change_event_list_url(site_id, state, page=1),
                     action_label="К первой странице",
                 )
-            has_any_history = bool(event_page.total_count) or state.has_filters
+            has_any_history = bool(event_page.total_count)
+            if not has_any_history and state.has_filters:
+                has_any_history = has_change_events(
+                    request.app.state.engine,
+                    site_id=site_id,
+                )
         except ValueError as error:
             request.app.state.logger.error(
                 "Повреждён список событий сайта %s: %s",
@@ -637,7 +642,9 @@ def create_app(
                     return_url=global_change_event_list_url(state, page=1),
                     action_label="К первой странице",
                 )
-            has_any_history = bool(event_page.total_count) or state.has_filters or state.site_id is not None
+            has_any_history = bool(event_page.total_count)
+            if not has_any_history and (state.has_filters or state.site_id is not None):
+                has_any_history = has_change_events(request.app.state.engine)
         except ValueError as error:
             request.app.state.logger.error(
                 "Повреждён общий список событий: %s",

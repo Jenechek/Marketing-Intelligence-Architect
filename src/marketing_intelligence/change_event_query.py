@@ -56,6 +56,30 @@ class ChangeEventPage:
     offset: int
 
 
+def has_change_events(engine: Engine, *, site_id: int | None = None) -> bool:
+    """Одним read-only запросом проверить наличие любой истории в области."""
+
+    if site_id is not None and (
+        isinstance(site_id, bool) or not isinstance(site_id, int) or site_id < 1
+    ):
+        raise ValueError("site_id должен быть положительным целым числом.")
+    snapshot = (
+        select(SnapshotChangeEvent.id.label("event_id"))
+        .join(CrawlRun, SnapshotChangeEvent.current_run_id == CrawlRun.id)
+    )
+    price = (
+        select(PriceChangeEvent.id.label("event_id"))
+        .join(CrawlRun, PriceChangeEvent.current_run_id == CrawlRun.id)
+    )
+    if site_id is not None:
+        snapshot = snapshot.where(CrawlRun.site_id == site_id)
+        price = price.where(CrawlRun.site_id == site_id)
+    combined = union_all(snapshot, price).subquery("existing_change_events")
+    statement = select(combined.c.event_id).limit(1)
+    with Session(engine) as session:
+        return session.exec(statement).first() is not None
+
+
 def load_change_events(
     engine: Engine,
     *,

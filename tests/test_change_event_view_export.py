@@ -14,7 +14,7 @@ from sqlalchemy import event, inspect
 from sqlmodel import Session, select
 
 from marketing_intelligence.change_event_export import CSV_HEADERS, prepare_change_event_export
-from marketing_intelligence.change_event_query import load_change_events
+from marketing_intelligence.change_event_query import has_change_events, load_change_events
 from marketing_intelligence.change_event_view_state import set_change_event_viewed
 from marketing_intelligence.config import Settings
 from marketing_intelligence.crawl_history import run_crawl
@@ -290,6 +290,13 @@ def test_view_state_idempotency_filter_two_queries_delete_and_site_isolation(tmp
     assert statements == 2
     assert viewed.total_count == 2
     assert {item.source for item in viewed.items} == {"snapshot", "price"}
+    statements = 0
+    event.listen(engine, "before_cursor_execute", count_statement)
+    try:
+        assert has_change_events(engine, site_id=site_id) is True
+    finally:
+        event.remove(engine, "before_cursor_execute", count_statement)
+    assert statements == 1
     assert delete_site(engine, site_id) is True
     with Session(engine) as session:
         states = session.exec(select(ChangeEventViewState)).all()
@@ -488,6 +495,50 @@ def test_empty_export_and_corrupt_data_return_safe_response(tmp_path: Path) -> N
     assert corrupt.status_code == 500
     assert corrupt.headers["content-type"].startswith("text/html")
     assert "Файл не создан" in corrupt.text
+
+
+def test_filtered_empty_states_distinguish_absent_history_from_no_matches(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "empty-states.db"
+    engine = build_engine(f"sqlite:///{path.as_posix()}")
+    initialize_database(engine)
+    empty_site = add_site(engine, "Без истории", "https://empty.test")
+    engine.dispose()
+    with TestClient(_app_for(path)) as client:
+        local_without_history = client.get(
+            f"/sites/{empty_site.id}/changes?view_status=viewed"
+        )
+        global_without_history = client.get(
+            f"/changes?site_id={empty_site.id}&view_status=viewed"
+        )
+    assert "Истории ещё нет" in local_without_history.text
+    assert "По фильтрам ничего не найдено" not in local_without_history.text
+    assert "Общей истории ещё нет" in global_without_history.text
+    assert "По фильтрам ничего не найдено" not in global_without_history.text
+
+    engine = build_engine(f"sqlite:///{path.as_posix()}")
+    history_site, _, snapshot_id, _, _ = _seed_history(
+        engine,
+        count=1,
+        site_name="С историей",
+    )
+    engine.dispose()
+    with TestClient(_app_for(path)) as client:
+        local_no_matches = client.get(
+            f"/sites/{history_site}/changes?view_status=viewed"
+        )
+        global_no_matches = client.get(f"/changes?site_id={empty_site.id}")
+        mismatched_scope = client.get(
+            f"/sites/{history_site}/changes/{snapshot_id}"
+            f"?scope=all&site_id={empty_site.id}"
+        )
+    assert "По фильтрам ничего не найдено" in local_no_matches.text
+    assert "Истории ещё нет" not in local_no_matches.text
+    assert "По фильтрам ничего не найдено" in global_no_matches.text
+    assert "Общей истории ещё нет" not in global_no_matches.text
+    assert mismatched_scope.status_code == 422
+    assert "Фильтр сайта не соответствует открытому событию" in mismatched_scope.text
 
 
 def test_actual_loopback_view_filter_export_restart_and_read_only_sha(
