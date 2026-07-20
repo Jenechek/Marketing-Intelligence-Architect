@@ -8,6 +8,7 @@ from sqlmodel import Session, select
 
 from .models import (
     AvailabilityCheck,
+    ChangeEventViewState,
     CrawlPagePriceRecord,
     CrawlPageRecord,
     CrawlPageSnapshot,
@@ -126,6 +127,26 @@ def delete_site(engine: Engine, site_id: int) -> bool:
         run_ids = select(CrawlRun.id).where(CrawlRun.site_id == site_id)
         page_ids = select(CrawlPageRecord.id).where(
             CrawlPageRecord.crawl_run_id.in_(run_ids)
+        )
+        snapshot_event_ids = select(SnapshotChangeEvent.id).where(
+            or_(
+                SnapshotChangeEvent.current_run_id.in_(run_ids),
+                SnapshotChangeEvent.previous_run_id.in_(run_ids),
+            )
+        )
+        price_event_ids = select(PriceChangeEvent.id).where(
+            or_(
+                PriceChangeEvent.current_run_id.in_(run_ids),
+                PriceChangeEvent.previous_run_id.in_(run_ids),
+            )
+        )
+        session.exec(
+            delete(ChangeEventViewState).where(
+                or_(
+                    ChangeEventViewState.snapshot_change_event_id.in_(snapshot_event_ids),
+                    ChangeEventViewState.price_change_event_id.in_(price_event_ids),
+                )
+            )
         )
         session.exec(
             delete(PriceChangeEvent).where(

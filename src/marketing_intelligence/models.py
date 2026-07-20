@@ -246,3 +246,36 @@ class PriceChangeEvent(SQLModel, table=True):
     )
     profile: str
     currency: str
+
+
+class ChangeEventViewState(SQLModel, table=True):
+    """Локальное ручное состояние просмотра одного события."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "snapshot_change_event_id",
+            name="uq_change_event_view_state_snapshot_event",
+        ),
+        UniqueConstraint(
+            "price_change_event_id",
+            name="uq_change_event_view_state_price_event",
+        ),
+        CheckConstraint(
+            "(snapshot_change_event_id IS NOT NULL AND price_change_event_id IS NULL) OR "
+            "(snapshot_change_event_id IS NULL AND price_change_event_id IS NOT NULL)",
+            name="ck_change_event_view_state_exactly_one_event",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    snapshot_change_event_id: int | None = Field(
+        default=None,
+        foreign_key="snapshotchangeevent.id",
+    )
+    price_change_event_id: int | None = Field(
+        default=None,
+        foreign_key="pricechangeevent.id",
+    )
+    viewed_at: datetime = Field(
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )

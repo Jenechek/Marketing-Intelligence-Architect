@@ -10,6 +10,13 @@ CHECK_AVAILABILITY_ACTION = "check-availability"
 START_CRAWL_ACTION = "start-crawl"
 
 
+def change_event_view_action(source: str, event_id: int, viewed: bool) -> str:
+    """Однозначно связать токен с источником, событием и переходом."""
+
+    transition = "view" if viewed else "unview"
+    return f"change-event:{source}:{event_id}:{transition}"
+
+
 def create_action_token(secret: bytes, site_id: int, action: str) -> str:
     """Создать непредсказуемый токен, связанный с сайтом и действием."""
 

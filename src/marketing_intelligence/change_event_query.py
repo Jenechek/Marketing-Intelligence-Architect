@@ -11,7 +11,13 @@ from sqlmodel import Session, select
 
 from .change_event import ChangeEventType, HistoryEventType, PriceChangeEventType
 from .change_importance import ChangeImportance
-from .models import CrawlRun, PriceChangeEvent, Site, SnapshotChangeEvent
+from .models import (
+    ChangeEventViewState,
+    CrawlRun,
+    PriceChangeEvent,
+    Site,
+    SnapshotChangeEvent,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +39,13 @@ class ChangeEventItem:
     previous_page_record_id: int | None
     text_distance: int | None
     change_ratio: Fraction | None
+    viewed_at: datetime | None
+    price_profile: str | None
+    price_currency: str | None
+
+    @property
+    def is_viewed(self) -> bool:
+        return self.viewed_at is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +56,30 @@ class ChangeEventPage:
     offset: int
 
 
+def has_change_events(engine: Engine, *, site_id: int | None = None) -> bool:
+    """Одним read-only запросом проверить наличие любой истории в области."""
+
+    if site_id is not None and (
+        isinstance(site_id, bool) or not isinstance(site_id, int) or site_id < 1
+    ):
+        raise ValueError("site_id должен быть положительным целым числом.")
+    snapshot = (
+        select(SnapshotChangeEvent.id.label("event_id"))
+        .join(CrawlRun, SnapshotChangeEvent.current_run_id == CrawlRun.id)
+    )
+    price = (
+        select(PriceChangeEvent.id.label("event_id"))
+        .join(CrawlRun, PriceChangeEvent.current_run_id == CrawlRun.id)
+    )
+    if site_id is not None:
+        snapshot = snapshot.where(CrawlRun.site_id == site_id)
+        price = price.where(CrawlRun.site_id == site_id)
+    combined = union_all(snapshot, price).subquery("existing_change_events")
+    statement = select(combined.c.event_id).limit(1)
+    with Session(engine) as session:
+        return session.exec(statement).first() is not None
+
+
 def load_change_events(
     engine: Engine,
     *,
@@ -51,6 +88,7 @@ def load_change_events(
     importance_levels: Collection[ChangeImportance | str] | None = None,
     from_time: datetime | None = None,
     before_time: datetime | None = None,
+    viewed: bool | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> ChangeEventPage:
@@ -65,6 +103,8 @@ def load_change_events(
         raise ValueError("site_id должен быть положительным целым числом.")
     type_values = _history_type_values(event_types)
     importance_values = _enum_values(importance_levels, ChangeImportance, "importance_levels")
+    if viewed is not None and not isinstance(viewed, bool):
+        raise ValueError("viewed должен быть логическим значением или None.")
 
     snapshot = (
         select(
@@ -82,9 +122,16 @@ def load_change_events(
             SnapshotChangeEvent.text_distance.label("text_distance"),
             SnapshotChangeEvent.change_ratio_numerator.label("change_ratio_numerator"),
             SnapshotChangeEvent.change_ratio_denominator.label("change_ratio_denominator"),
+            ChangeEventViewState.viewed_at.label("viewed_at"),
+            cast(literal(None), String).label("price_profile"),
+            cast(literal(None), String).label("price_currency"),
         )
         .join(CrawlRun, SnapshotChangeEvent.current_run_id == CrawlRun.id)
         .join(Site, CrawlRun.site_id == Site.id)
+        .outerjoin(
+            ChangeEventViewState,
+            ChangeEventViewState.snapshot_change_event_id == SnapshotChangeEvent.id,
+        )
     )
     price = (
         select(
@@ -102,9 +149,16 @@ def load_change_events(
             PriceChangeEvent.previous_page_record_id.label("previous_page_record_id"),
             literal(None).label("text_distance"), literal(None).label("change_ratio_numerator"),
             literal(None).label("change_ratio_denominator"),
+            ChangeEventViewState.viewed_at.label("viewed_at"),
+            PriceChangeEvent.profile.label("price_profile"),
+            PriceChangeEvent.currency.label("price_currency"),
         )
         .join(CrawlRun, PriceChangeEvent.current_run_id == CrawlRun.id)
         .join(Site, CrawlRun.site_id == Site.id)
+        .outerjoin(
+            ChangeEventViewState,
+            ChangeEventViewState.price_change_event_id == PriceChangeEvent.id,
+        )
     )
     combined = union_all(snapshot, price).subquery("combined_change_events")
     filters = []
@@ -118,6 +172,10 @@ def load_change_events(
         filters.append(combined.c.current_completed_at >= normalized_from)
     if normalized_before is not None:
         filters.append(combined.c.current_completed_at < normalized_before)
+    if viewed is True:
+        filters.append(combined.c.viewed_at.is_not(None))
+    elif viewed is False:
+        filters.append(combined.c.viewed_at.is_(None))
     count_statement = select(func.count()).select_from(combined).where(*filters)
     item_statement = (
         select(*combined.c)
@@ -188,4 +246,11 @@ def _item_from_row(row) -> ChangeEventItem:
         previous_page_record_id=row.previous_page_record_id,
         text_distance=row.text_distance,
         change_ratio=None if numerator is None else Fraction(numerator, denominator),
+        viewed_at=(
+            _normalize_datetime(row.viewed_at, "viewed_at")
+            if row.viewed_at is not None
+            else None
+        ),
+        price_profile=row.price_profile,
+        price_currency=row.price_currency,
     )

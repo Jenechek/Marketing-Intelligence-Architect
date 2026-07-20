@@ -29,6 +29,22 @@
                 </div>
             </dl>
             <p>{{ event_explanation(detail.event_type) }}</p>
+            <p>Статус: {{ 'Просмотрено' if detail.viewed_at else 'Не просмотрено' }}{% if detail.viewed_at %} · {{ to_local_datetime(detail.viewed_at) }}{% endif %}</p>
+            {% if view_state_changed %}<div class="notice success" role="status">Статус просмотра сохранён.</div>{% endif %}
+            <form method="post" action="/sites/{{ site.id }}/changes/{{ detail.event_id }}/view-state">
+                <input type="hidden" name="source" value="{{ source }}">
+                <input type="hidden" name="action" value="{{ 'unview' if detail.viewed_at else 'view' }}">
+                <input type="hidden" name="action_token" value="{{ view_token }}">
+                <input type="hidden" name="scope" value="{{ scope }}">
+                <input type="hidden" name="return_area" value="detail">
+                <input type="hidden" name="site_id" value="{{ state.site_id_value }}">
+                <input type="hidden" name="event_type" value="{{ state.event_type_value }}">
+                <input type="hidden" name="date_from" value="{{ state.date_from_value }}">
+                <input type="hidden" name="date_to" value="{{ state.date_to_value }}">
+                <input type="hidden" name="view_status" value="{{ state.view_status_value }}">
+                <input type="hidden" name="page" value="{{ state.page }}">
+                <button class="primary-action" type="submit">{{ 'Вернуть в непросмотренные' if detail.viewed_at else 'Отметить просмотренным' }}</button>
+            </form>
         </section>
 
         <section class="comparison" aria-label="Сравнение значений: Стало, затем Было">
