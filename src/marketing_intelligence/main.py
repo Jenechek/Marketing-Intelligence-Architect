@@ -22,7 +22,7 @@ from .check_history import (
     to_local_datetime,
 )
 from .change_event_detail import ChangeEventDataError, load_change_event
-from .change_event import ChangeEventType
+from .change_event import HISTORY_EVENT_TYPES
 from .change_event_filters import (
     EVENTS_PER_PAGE,
     ChangeEventListForm,
@@ -374,7 +374,7 @@ def create_app(
                     "event_page": None,
                     "form": form,
                     "errors": errors,
-                    "event_types": tuple(ChangeEventType),
+                    "event_types": HISTORY_EVENT_TYPES,
                     "event_type_title": event_type_title,
                 },
                 status_code=422,
@@ -436,7 +436,7 @@ def create_app(
                 "form": form,
                 "errors": {},
                 "state": state,
-                "event_types": tuple(ChangeEventType),
+                "event_types": HISTORY_EVENT_TYPES,
                 "has_any_history": has_any_history,
                 "current_page": state.page,
                 "total_pages": max(
@@ -454,9 +454,12 @@ def create_app(
                     if state.page * EVENTS_PER_PAGE < event_page.total_count
                     else None
                 ),
-                "detail_url": lambda event_id: (
-                    f"/sites/{site_id}/changes/{event_id}"
-                    + (f"?{state.query()}" if state.query() else "")
+                "detail_url": lambda event: (
+                    f"/sites/{site_id}/changes/{event.event_id}"
+                    + ("?" + "&".join(filter(None, [
+                        "source=price" if event.source == "price" else "",
+                        state.query(),
+                    ])) if event.source == "price" or state.query() else "")
                 ),
                 "event_type_title": event_type_title,
                 "event_explanation": event_explanation,
@@ -494,7 +497,7 @@ def create_app(
             "event_page": None,
             "form": form,
             "errors": errors,
-            "event_types": tuple(ChangeEventType),
+            "event_types": HISTORY_EVENT_TYPES,
             "event_type_title": event_type_title,
             "event_explanation": event_explanation,
             "importance_title": importance_title,
@@ -586,6 +589,7 @@ def create_app(
                 ),
                 "detail_url": lambda event: (
                     f"/sites/{event.site_id}/changes/{event.event_id}{detail_suffix}"
+                    + ("&source=price" if event.source == "price" else "")
                 ),
             },
         )
@@ -640,11 +644,22 @@ def create_app(
             if scope == "all"
             else change_event_list_url(site_id, state)
         )
+        source = request.query_params.get("source", "snapshot")
+        if source not in {"snapshot", "price"}:
+            return render_change_event_error(
+                request,
+                site_id,
+                title="Параметры возврата указаны неверно",
+                message="Источник события указан неверно.",
+                status_code=422,
+                return_url=return_url,
+            )
         try:
             detail = load_change_event(
                 request.app.state.engine,
                 site_id=site_id,
                 event_id=event_id,
+                source=source,
             )
         except ChangeEventDataError as error:
             request.app.state.logger.error(

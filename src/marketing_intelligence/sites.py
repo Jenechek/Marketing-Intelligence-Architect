@@ -12,6 +12,7 @@ from .models import (
     CrawlPageRecord,
     CrawlPageSnapshot,
     CrawlRun,
+    PriceChangeEvent,
     Site,
     SnapshotChangeEvent,
 )
@@ -125,6 +126,14 @@ def delete_site(engine: Engine, site_id: int) -> bool:
         run_ids = select(CrawlRun.id).where(CrawlRun.site_id == site_id)
         page_ids = select(CrawlPageRecord.id).where(
             CrawlPageRecord.crawl_run_id.in_(run_ids)
+        )
+        session.exec(
+            delete(PriceChangeEvent).where(
+                or_(
+                    PriceChangeEvent.current_run_id.in_(run_ids),
+                    PriceChangeEvent.previous_run_id.in_(run_ids),
+                )
+            )
         )
         session.exec(
             delete(SnapshotChangeEvent).where(

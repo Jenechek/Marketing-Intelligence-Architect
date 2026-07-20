@@ -3,8 +3,8 @@
 from dataclasses import dataclass
 from enum import Enum
 
-from .change_event import ChangeEventType
-from .change_event_detail import ChangeEventDetail, SnapshotValues
+from .change_event import ChangeEventType, HistoryEventType, PriceChangeEventType
+from .change_event_detail import ChangeEventDetail, PriceValues, SnapshotValues
 from .change_importance import ChangeImportance
 
 
@@ -16,6 +16,7 @@ EVENT_TYPE_TITLES = {
     ChangeEventType.H1_CHANGED: "Изменение H1",
     ChangeEventType.TEXT_CHANGED: "Изменение текста",
     ChangeEventType.INTERNAL_LINKS_CHANGED: "Изменение внутренних ссылок",
+    PriceChangeEventType.PRICE_CHANGED: "Изменение цены",
 }
 
 IMPORTANCE_TITLES = {
@@ -51,6 +52,10 @@ EVENT_EXPLANATIONS = {
         "Набор внутренних ссылок страницы отличается от предыдущего "
         "завершённого обхода."
     ),
+    PriceChangeEventType.PRICE_CHANGED: (
+        "Точная цена однозначной товарной посадочной страницы отличается "
+        "от предыдущего завершённого обхода."
+    ),
 }
 
 
@@ -61,6 +66,7 @@ class ValueState(str, Enum):
     EMPTY_LINKS = "empty_links"
     TEXT = "text"
     LINKS = "links"
+    PRICE = "price"
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,17 +74,22 @@ class PresentedSide:
     state: ValueState
     text: str | None = None
     links: tuple[str, ...] = ()
+    currency: str | None = None
+    low: str | None = None
+    high: str | None = None
 
 
-def event_type_title(event_type: ChangeEventType) -> str:
+def event_type_title(event_type: HistoryEventType) -> str:
     return EVENT_TYPE_TITLES[event_type]
 
 
-def importance_title(importance: ChangeImportance) -> str:
+def importance_title(importance: ChangeImportance | None) -> str:
+    if importance is None:
+        return "Не оценивалась"
     return IMPORTANCE_TITLES[importance]
 
 
-def event_explanation(event_type: ChangeEventType) -> str:
+def event_explanation(event_type: HistoryEventType) -> str:
     """Вернуть детерминированное фактическое объяснение типа события."""
 
     return EVENT_EXPLANATIONS[event_type]
@@ -96,12 +107,21 @@ def present_sides(
 
 
 def _present_side(
-    event_type: ChangeEventType,
+    event_type: HistoryEventType,
     url: str,
-    snapshot: SnapshotValues | None,
+    snapshot: SnapshotValues | PriceValues | None,
 ) -> PresentedSide:
     if snapshot is None:
         return PresentedSide(ValueState.ABSENT_SIDE)
+    if event_type is PriceChangeEventType.PRICE_CHANGED:
+        assert isinstance(snapshot, PriceValues)
+        return PresentedSide(
+            ValueState.PRICE,
+            currency=snapshot.currency,
+            low=snapshot.low,
+            high=snapshot.high,
+        )
+    assert isinstance(snapshot, SnapshotValues)
     if event_type in {ChangeEventType.PAGE_ADDED, ChangeEventType.PAGE_REMOVED}:
         return PresentedSide(ValueState.TEXT, text=url)
     if event_type is ChangeEventType.INTERNAL_LINKS_CHANGED:

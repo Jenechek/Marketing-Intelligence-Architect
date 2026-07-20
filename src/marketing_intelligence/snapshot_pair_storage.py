@@ -8,17 +8,19 @@ from sqlalchemy import and_, or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from .models import CrawlPageRecord, CrawlPageSnapshot, CrawlRun
+from .models import CrawlPagePriceRecord, CrawlPageRecord, CrawlPageSnapshot, CrawlRun
 from .snapshot_comparison_input import (
     CompletedSnapshotComparisonInput,
     MatchedSnapshotPageVersions,
     SnapshotPageVersion,
+    SnapshotPriceValue,
 )
 from .snapshot_page_matching import (
     CompletedSnapshotPair,
     SnapshotPageReference,
     match_snapshot_pages,
 )
+from .price_persistence import decode_decimal_text
 
 
 COMPLETED_STATUS = "completed"
@@ -203,16 +205,47 @@ def _load_snapshot_page_versions(
             CrawlPageSnapshot.normalized_text,
             CrawlPageSnapshot.content_hash,
             CrawlPageSnapshot.internal_links_json,
+            CrawlPagePriceRecord.amount_text,
+            CrawlPagePriceRecord.currency,
+            CrawlPagePriceRecord.kind,
+            CrawlPagePriceRecord.source,
         )
         .join(
             CrawlPageSnapshot,
             CrawlPageSnapshot.crawl_page_record_id == CrawlPageRecord.id,
         )
+        .outerjoin(
+            CrawlPagePriceRecord,
+            CrawlPagePriceRecord.crawl_page_snapshot_id
+            == CrawlPageSnapshot.crawl_page_record_id,
+        )
         .where(CrawlPageRecord.crawl_run_id.in_(run_ids))
-        .order_by(CrawlPageRecord.crawl_run_id, CrawlPageRecord.id)
+        .order_by(
+            CrawlPageRecord.crawl_run_id,
+            CrawlPageRecord.id,
+            CrawlPagePriceRecord.sequence_number,
+        )
     ).all()
-    by_run: dict[int, list[SnapshotPageVersion]] = {run_id: [] for run_id in run_ids}
+    page_data: dict[int, tuple] = {}
+    prices_by_page: dict[int, list[SnapshotPriceValue]] = {}
     for row in rows:
+        page_data.setdefault(row.id, tuple(row[:10]))
+        prices_by_page.setdefault(row.id, [])
+        if row.amount_text is not None:
+            try:
+                amount = decode_decimal_text(row.amount_text)
+            except (ArithmeticError, ValueError):
+                amount = None
+            prices_by_page[row.id].append(
+                SnapshotPriceValue(
+                    amount=amount,
+                    currency=row.currency,
+                    kind=row.kind,
+                    source=row.source,
+                )
+            )
+    by_run: dict[int, list[SnapshotPageVersion]] = {run_id: [] for run_id in run_ids}
+    for row in page_data.values():
         (
             run_id,
             identifier,
@@ -238,6 +271,7 @@ def _load_snapshot_page_versions(
                 internal_links=_decode_internal_links(
                     internal_links_json, identifier
                 ),
+                prices=tuple(prices_by_page[identifier]),
             )
         )
     return {run_id: tuple(run_versions) for run_id, run_versions in by_run.items()}

@@ -2,8 +2,19 @@
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 
 from .snapshot_page_matching import SnapshotPageReference
+
+
+@dataclass(frozen=True)
+class SnapshotPriceValue:
+    """Одна сохранённая цена без зависимости от ORM и конкретной СУБД."""
+
+    amount: Decimal | None
+    currency: str | None
+    kind: str
+    source: str
 
 
 @dataclass(frozen=True)
@@ -19,6 +30,7 @@ class SnapshotPageVersion:
     normalized_text: str
     content_hash: str
     internal_links: tuple[str, ...]
+    prices: tuple[SnapshotPriceValue, ...] = ()
 
 
 @dataclass(frozen=True)

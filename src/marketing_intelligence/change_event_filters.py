@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from urllib.parse import urlencode
 
-from .change_event import ChangeEventType
+from .change_event import ChangeEventType, HistoryEventType, PriceChangeEventType
 
 
 EVENTS_PER_PAGE = 20
@@ -20,7 +20,7 @@ class ChangeEventListState:
     date_from_value: str
     date_to_value: str
     page_value: str
-    event_type: ChangeEventType | None
+    event_type: HistoryEventType | None
     from_time: datetime | None
     before_time: datetime | None
     page: int
@@ -80,10 +80,14 @@ def parse_change_event_list_state(
                 raise ValueError
         except ValueError:
             errors["site_id"] = "Выберите существующий сайт из списка."
-    parsed_type: ChangeEventType | None = None
+    parsed_type: HistoryEventType | None = None
     if event_type:
         try:
-            parsed_type = ChangeEventType(event_type)
+            parsed_type = (
+                PriceChangeEventType.PRICE_CHANGED
+                if event_type == PriceChangeEventType.PRICE_CHANGED.value
+                else ChangeEventType(event_type)
+            )
         except ValueError:
             errors["event_type"] = "Выберите один из доступных типов события."
 

@@ -82,7 +82,7 @@
                         <p>{{ event_explanation(event.event_type) }}</p>
                         <p class="break-text">{{ event.url }}</p>
                     </div>
-                    <a class="secondary-action" href="{{ detail_url(event.event_id) }}">Подробнее</a>
+                    <a class="secondary-action" href="{{ detail_url(event) }}">Подробнее</a>
                 </li>
                 {% endfor %}
             </ol>
