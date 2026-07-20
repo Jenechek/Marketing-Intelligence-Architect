@@ -1,11 +1,17 @@
-"""Нейтральная модель карты структуры одного сохранённого обхода."""
+"""Нейтральная модель и графовый анализ одного сохранённого обхода."""
 
+from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
+import math
 
 
 class StructureDataError(ValueError):
     """Сохранённые связанные данные карты противоречат друг другу."""
+
+
+class StructureAnalysisError(RuntimeError):
+    """PageRank нельзя достоверно рассчитать для переданного графа."""
 
 
 class LinkState(StrEnum):
@@ -17,6 +23,25 @@ class LinkState(StrEnum):
     NETWORK_ERROR = "network_error"
     TIMEOUT = "timeout"
     OTHER = "other"
+
+
+class StructuralSignal(StrEnum):
+    LOW_CONNECTIVITY = "low_connectivity"
+    DEAD_END = "dead_end"
+    ISLAND = "island"
+    CYCLE_TRAP = "cycle_trap"
+    ANOMALOUS_DEPTH = "anomalous_depth"
+    BOTTLENECK = "bottleneck"
+
+
+SIGNAL_TITLES = {
+    StructuralSignal.LOW_CONNECTIVITY: "Недостаточная внутренняя связность",
+    StructuralSignal.DEAD_END: "Тупиковая зона",
+    StructuralSignal.ISLAND: "Структурный остров",
+    StructuralSignal.CYCLE_TRAP: "Циклическая ловушка",
+    StructuralSignal.ANOMALOUS_DEPTH: "Аномальная глубина",
+    StructuralSignal.BOTTLENECK: "Бутылочное горлышко",
+}
 
 
 OUTCOME_TITLES = {
@@ -102,9 +127,39 @@ class StructureTree:
 
 
 @dataclass(frozen=True, slots=True)
+class PageStructureAnalysis:
+    record_id: int
+    pagerank: float | None
+    pagerank_rank: int | None
+    signals: tuple[StructuralSignal, ...]
+    dead_end_is_page: bool
+    cycle_component_record_ids: tuple[int, ...]
+    bottleneck_affected_count: int
+
+    def has_signal(self, signal: StructuralSignal) -> bool:
+        return signal in self.signals
+
+
+@dataclass(frozen=True, slots=True)
+class StructureAnalysis:
+    pages: tuple[PageStructureAnalysis, ...]
+    html_page_count: int
+    pagerank_error: str | None
+    low_connectivity_applicable: bool
+    anomalous_depth_applicable: bool
+
+    def page_by_id(self, record_id: int) -> PageStructureAnalysis | None:
+        return next((page for page in self.pages if page.record_id == record_id), None)
+
+    def signal_count(self, signal: StructuralSignal) -> int:
+        return sum(page.has_signal(signal) for page in self.pages)
+
+
+@dataclass(frozen=True, slots=True)
 class SiteStructure:
     pages: tuple[StructurePage, ...]
     edges: tuple[StructureEdge, ...]
+    analysis: StructureAnalysis
 
     def page_by_id(self, record_id: int) -> StructurePage | None:
         return next((page for page in self.pages if page.record_id == record_id), None)
@@ -192,7 +247,245 @@ def build_site_structure(raw_pages: tuple[RawStructurePage, ...]) -> SiteStructu
                 unchecked_outgoing_count=sum(link.state is LinkState.UNCHECKED for link in outgoing),
             )
         )
-    return SiteStructure(tuple(pages), tuple(edges))
+    built_pages = tuple(pages)
+    built_edges = tuple(edges)
+    return SiteStructure(built_pages, built_edges, analyze_site_structure(built_pages, built_edges))
+
+
+def calculate_pagerank(
+    node_ids: tuple[int, ...],
+    adjacency: dict[int, tuple[int, ...]],
+    *,
+    damping: float = 0.85,
+    tolerance: float = 1e-12,
+    max_iterations: int = 200,
+) -> dict[int, float]:
+    """Рассчитать детерминированный направленный PageRank без зависимостей."""
+
+    if not node_ids:
+        return {}
+    if (
+        len(set(node_ids)) != len(node_ids)
+        or not 0.0 < damping < 1.0
+        or tolerance < 0.0
+        or max_iterations < 1
+    ):
+        raise StructureAnalysisError("Параметры расчёта PageRank повреждены.")
+    known = set(node_ids)
+    normalized: dict[int, tuple[int, ...]] = {}
+    for node_id in node_ids:
+        targets = adjacency.get(node_id, ())
+        if any(target not in known for target in targets):
+            raise StructureAnalysisError("Граф PageRank содержит неизвестную страницу.")
+        normalized[node_id] = tuple(sorted(set(targets)))
+
+    count = len(node_ids)
+    ranks = {node_id: 1.0 / count for node_id in node_ids}
+    base = (1.0 - damping) / count
+    for _ in range(max_iterations):
+        dangling = sum(ranks[node_id] for node_id in node_ids if not normalized[node_id])
+        updated = {node_id: base + damping * dangling / count for node_id in node_ids}
+        for source_id in node_ids:
+            targets = normalized[source_id]
+            if targets:
+                share = damping * ranks[source_id] / len(targets)
+                for target_id in targets:
+                    updated[target_id] += share
+        if any(not math.isfinite(value) or value < 0.0 for value in updated.values()):
+            raise StructureAnalysisError("Расчёт PageRank дал некорректное значение.")
+        change = sum(abs(updated[node_id] - ranks[node_id]) for node_id in node_ids)
+        ranks = updated
+        if change <= tolerance:
+            return ranks
+    raise StructureAnalysisError("PageRank не сошёлся за 200 итераций.")
+
+
+def analyze_site_structure(
+    pages: tuple[StructurePage, ...], edges: tuple[StructureEdge, ...]
+) -> StructureAnalysis:
+    """Рассчитать PageRank и объяснимые сигналы только по HTML-графу."""
+
+    html_pages = tuple(page for page in pages if page.outcome == "html")
+    html_ids = tuple(page.record_id for page in html_pages)
+    html_position = {record_id: index for index, record_id in enumerate(html_ids)}
+    html_set = set(html_ids)
+    adjacency_sets = {record_id: set() for record_id in html_ids}
+    reverse_sets = {record_id: set() for record_id in html_ids}
+    for edge in edges:
+        if edge.source_record_id in html_set and edge.target_record_id in html_set:
+            adjacency_sets[edge.source_record_id].add(edge.target_record_id)
+            reverse_sets[edge.target_record_id].add(edge.source_record_id)
+    adjacency = {
+        record_id: tuple(sorted(targets))
+        for record_id, targets in adjacency_sets.items()
+    }
+
+    pagerank_error: str | None = None
+    try:
+        pageranks = calculate_pagerank(html_ids, adjacency)
+    except StructureAnalysisError as error:
+        pageranks = {}
+        pagerank_error = str(error)
+    ranked_ids = sorted(
+        html_ids, key=lambda item: (-pageranks.get(item, 0.0), html_position[item])
+    )
+    ranks = {record_id: index for index, record_id in enumerate(ranked_ids, start=1)} if pageranks else {}
+
+    start_id = pages[0].record_id if pages else None
+    reachable = _reachable(start_id, adjacency) if start_id in html_set else set()
+    islands = html_set - reachable
+    components = _strongly_connected_components(html_ids, adjacency)
+    sink_components = tuple(
+        component
+        for component in components
+        if not any(
+            target not in component
+            for source in component
+            for target in adjacency[source]
+        )
+    )
+    dead_end_ids = set().union(*sink_components) if sink_components else set()
+    cycle_components = tuple(
+        component
+        for component in sink_components
+        if len(component) >= 2 or any(node in adjacency[node] for node in component)
+    )
+    cycle_by_id = {
+        node: tuple(sorted(component, key=html_position.__getitem__))
+        for component in cycle_components
+        for node in component
+    }
+
+    low_candidates = tuple(
+        record_id for record_id in html_ids
+        if record_id != start_id and record_id not in islands
+    )
+    low_applicable = len(low_candidates) >= 10 and not pagerank_error
+    low_ids: set[int] = set()
+    if low_applicable:
+        p20 = _nearest_rank(tuple(sorted(pageranks[item] for item in low_candidates)), 0.20)
+        low_ids = {
+            item for item in low_candidates
+            if pageranks[item] < p20 and len(reverse_sets[item]) <= 1
+        }
+
+    reachable_ids = tuple(item for item in html_ids if item in reachable)
+    depth_applicable = len(reachable_ids) >= 10
+    deep_ids: set[int] = set()
+    if depth_applicable:
+        page_by_id = {page.record_id: page for page in html_pages}
+        p90 = _nearest_rank(tuple(sorted(page_by_id[item].depth for item in reachable_ids)), 0.90)
+        deep_ids = {
+            item for item in reachable_ids
+            if page_by_id[item].depth >= 5 and page_by_id[item].depth > p90
+        }
+
+    bottlenecks: dict[int, int] = {}
+    if start_id in reachable:
+        threshold = max(2, math.ceil(0.10 * (len(reachable) - 1)))
+        for removed in reachable_ids:
+            if removed == start_id:
+                continue
+            remaining_reachable = _reachable(start_id, adjacency, removed=removed)
+            affected = len(reachable - {removed} - remaining_reachable)
+            if affected >= threshold:
+                bottlenecks[removed] = affected
+
+    result: list[PageStructureAnalysis] = []
+    signal_order = tuple(StructuralSignal)
+    for page in pages:
+        record_id = page.record_id
+        signals: set[StructuralSignal] = set()
+        if record_id in low_ids:
+            signals.add(StructuralSignal.LOW_CONNECTIVITY)
+        if record_id in dead_end_ids:
+            signals.add(StructuralSignal.DEAD_END)
+        if record_id in islands and record_id != start_id:
+            signals.add(StructuralSignal.ISLAND)
+        if record_id in cycle_by_id:
+            signals.add(StructuralSignal.CYCLE_TRAP)
+        if record_id in deep_ids:
+            signals.add(StructuralSignal.ANOMALOUS_DEPTH)
+        if record_id in bottlenecks:
+            signals.add(StructuralSignal.BOTTLENECK)
+        result.append(
+            PageStructureAnalysis(
+                record_id,
+                pageranks.get(record_id),
+                ranks.get(record_id),
+                tuple(signal for signal in signal_order if signal in signals),
+                record_id in dead_end_ids and not adjacency.get(record_id, ()),
+                cycle_by_id.get(record_id, ()),
+                bottlenecks.get(record_id, 0),
+            )
+        )
+    return StructureAnalysis(
+        tuple(result), len(html_ids), pagerank_error, low_applicable, depth_applicable
+    )
+
+
+def _nearest_rank(values: tuple[float | int, ...], percentile: float) -> float | int:
+    return values[math.ceil(percentile * len(values)) - 1]
+
+
+def _reachable(
+    start_id: int | None,
+    adjacency: dict[int, tuple[int, ...]],
+    *,
+    removed: int | None = None,
+) -> set[int]:
+    if start_id is None or start_id == removed or start_id not in adjacency:
+        return set()
+    found = {start_id}
+    pending = deque([start_id])
+    while pending:
+        source = pending.popleft()
+        for target in adjacency[source]:
+            if target != removed and target not in found:
+                found.add(target)
+                pending.append(target)
+    return found
+
+
+def _strongly_connected_components(
+    node_ids: tuple[int, ...], adjacency: dict[int, tuple[int, ...]]
+) -> tuple[frozenset[int], ...]:
+    """Детерминированный алгоритм Тарьяна."""
+
+    next_index = 0
+    indexes: dict[int, int] = {}
+    lowlinks: dict[int, int] = {}
+    stack: list[int] = []
+    on_stack: set[int] = set()
+    components: list[frozenset[int]] = []
+
+    def visit(node: int) -> None:
+        nonlocal next_index
+        indexes[node] = next_index
+        lowlinks[node] = next_index
+        next_index += 1
+        stack.append(node)
+        on_stack.add(node)
+        for target in adjacency[node]:
+            if target not in indexes:
+                visit(target)
+                lowlinks[node] = min(lowlinks[node], lowlinks[target])
+            elif target in on_stack:
+                lowlinks[node] = min(lowlinks[node], indexes[target])
+        if lowlinks[node] == indexes[node]:
+            component: set[int] = set()
+            while True:
+                member = stack.pop()
+                on_stack.remove(member)
+                component.add(member)
+                if member == node:
+                    break
+            components.append(frozenset(component))
+
+    for node in node_ids:
+        if node not in indexes:
+            visit(node)
+    return tuple(components)
 
 
 def build_tree(pages: tuple[StructurePage, ...]) -> StructureTree:
