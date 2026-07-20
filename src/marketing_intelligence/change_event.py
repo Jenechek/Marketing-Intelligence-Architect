@@ -13,3 +13,13 @@ class ChangeEventType(str, Enum):
     H1_CHANGED = "h1_changed"
     TEXT_CHANGED = "text_changed"
     INTERNAL_LINKS_CHANGED = "internal_links_changed"
+
+
+class PriceChangeEventType(str, Enum):
+    """Ценовой тип отдельной таблицы, не расширяющий ограничение снимков."""
+
+    PRICE_CHANGED = "price_changed"
+
+
+HISTORY_EVENT_TYPES = (*ChangeEventType, PriceChangeEventType.PRICE_CHANGED)
+HistoryEventType = ChangeEventType | PriceChangeEventType

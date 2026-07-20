@@ -9,14 +9,18 @@ from typing import Any
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, select
 
-from .change_event import ChangeEventType
+from .change_event import ChangeEventType, HistoryEventType, PriceChangeEventType
 from .change_importance import ChangeImportance
 from .models import (
     CrawlPageRecord,
+    CrawlPagePriceRecord,
     CrawlPageSnapshot,
     CrawlRun,
+    PriceChangeEvent,
     SnapshotChangeEvent,
 )
+from .snapshot_comparison_input import SnapshotPriceValue
+from .snapshot_price_comparison import build_price_profile
 
 
 class ChangeEventDataError(ValueError):
@@ -35,19 +39,29 @@ class SnapshotValues:
 
 
 @dataclass(frozen=True, slots=True)
+class PriceValues:
+    """Точный однозначный ценовой профиль одной стороны."""
+
+    profile: str
+    currency: str
+    low: str
+    high: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ChangeEventDetail:
     """Неизменяемое событие: current/Стало всегда перед previous/Было."""
 
     event_id: int
-    event_type: ChangeEventType
+    event_type: HistoryEventType
     url: str
     current_completed_at: datetime
-    importance: ChangeImportance
-    weight: int
+    importance: ChangeImportance | None
+    weight: int | None
     current_run_id: int
     previous_run_id: int
-    current: SnapshotValues | None
-    previous: SnapshotValues | None
+    current: SnapshotValues | PriceValues | None
+    previous: SnapshotValues | PriceValues | None
     text_distance: int | None
     change_ratio: Fraction | None
 
@@ -57,8 +71,14 @@ def load_change_event(
     *,
     site_id: int,
     event_id: int,
+    source: str = "snapshot",
 ) -> ChangeEventDetail | None:
     """Загрузить одно событие сайта, не раскрывая события другого сайта."""
+
+    if source == "price":
+        return _load_price_change_event(engine, site_id=site_id, event_id=event_id)
+    if source != "snapshot":
+        raise ValueError("Неизвестный источник события.")
 
     with Session(engine) as session:
         row = session.exec(
@@ -110,9 +130,94 @@ def load_change_event(
     )
 
 
+def _load_price_change_event(
+    engine: Engine, *, site_id: int, event_id: int
+) -> ChangeEventDetail | None:
+    with Session(engine) as session:
+        row = session.exec(
+            select(PriceChangeEvent, CrawlRun)
+            .join(CrawlRun, PriceChangeEvent.current_run_id == CrawlRun.id)
+            .where(PriceChangeEvent.id == event_id, CrawlRun.site_id == site_id)
+        ).first()
+        if row is None:
+            return None
+        event, current_run = row
+        previous_run = session.get(CrawlRun, event.previous_run_id)
+        _validate_runs(session, event, current_run, previous_run, site_id)
+        current = _load_price_side(
+            session, event.current_page_record_id, event.current_run_id, event.url, "Стало"
+        )
+        previous = _load_price_side(
+            session, event.previous_page_record_id, event.previous_run_id, event.url, "Было"
+        )
+        if (
+            current.profile != event.profile
+            or previous.profile != event.profile
+            or current.currency != event.currency
+            or previous.currency != event.currency
+            or (current.low, current.high) == (previous.low, previous.high)
+        ):
+            raise ChangeEventDataError(
+                f"Ценовые значения события {event.id} не соответствуют сохранённому профилю."
+            )
+    return ChangeEventDetail(
+        event_id=event.id,
+        event_type=PriceChangeEventType.PRICE_CHANGED,
+        url=event.url,
+        current_completed_at=_as_utc(event.current_completed_at),
+        importance=None,
+        weight=None,
+        current_run_id=event.current_run_id,
+        previous_run_id=event.previous_run_id,
+        current=current,
+        previous=previous,
+        text_distance=None,
+        change_ratio=None,
+    )
+
+
+def _load_price_side(
+    session: Session,
+    page_record_id: int,
+    run_id: int,
+    event_url: str,
+    side_name: str,
+) -> PriceValues:
+    page = session.get(CrawlPageRecord, page_record_id)
+    if page is None or page.crawl_run_id != run_id or page.url != event_url:
+        raise ChangeEventDataError(
+            f"Сторона «{side_name}» не соответствует обходу или URL события."
+        )
+    records = session.exec(
+        select(CrawlPagePriceRecord)
+        .where(CrawlPagePriceRecord.crawl_page_snapshot_id == page_record_id)
+        .order_by(CrawlPagePriceRecord.sequence_number)
+    ).all()
+    values = []
+    for record in records:
+        try:
+            amount = record.amount
+        except (ArithmeticError, ValueError) as error:
+            raise ChangeEventDataError(
+                f"Цена стороны «{side_name}» повреждена."
+            ) from error
+        values.append(SnapshotPriceValue(amount, record.currency, record.kind, record.source))
+    profile = build_price_profile(tuple(values))
+    if profile is None:
+        raise ChangeEventDataError(
+            f"Цена стороны «{side_name}» больше не образует однозначный профиль."
+        )
+    return PriceValues(
+        profile=profile.kind,
+        currency=profile.currency,
+        low=str(profile.low),
+        high=str(profile.high) if profile.high is not None else None,
+    )
+
+
 def _validate_runs(
     session: Session,
-    event: SnapshotChangeEvent,
+    event: SnapshotChangeEvent | PriceChangeEvent,
     current: CrawlRun,
     previous: CrawlRun | None,
     site_id: int,

@@ -10,6 +10,15 @@
 <ul class="value-links">
     {% for link in side.links %}<li>{{ link }}</li>{% endfor %}
 </ul>
+{% elif side.state.value == "price" %}
+{% if side.high is none %}
+<dl class="summary-list"><div><dt>Цена</dt><dd>{{ side.low }} {{ side.currency }}</dd></div></dl>
+{% else %}
+<dl class="summary-list">
+    <div><dt>Нижняя цена</dt><dd>{{ side.low }} {{ side.currency }}</dd></div>
+    <div><dt>Верхняя цена</dt><dd>{{ side.high }} {{ side.currency }}</dd></div>
+</dl>
+{% endif %}
 {% else %}
 <div class="exact-value">{{ side.text }}</div>
 {% endif %}

@@ -216,3 +216,33 @@ class SnapshotChangeEvent(SQLModel, table=True):
             self.change_ratio_numerator,
             self.change_ratio_denominator,
         )
+
+
+class PriceChangeEvent(SQLModel, table=True):
+    """Достоверное изменение цены между двумя completed-снимками страницы."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "current_run_id",
+            "previous_run_id",
+            "url",
+            name="uq_price_change_event_pair_url",
+        ),
+        CheckConstraint(
+            "profile IN ('price', 'range')",
+            name="ck_price_change_event_profile",
+        ),
+        CheckConstraint("currency <> ''", name="ck_price_change_event_currency"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    current_run_id: int = Field(foreign_key="crawlrun.id", index=True)
+    previous_run_id: int = Field(foreign_key="crawlrun.id", index=True)
+    current_page_record_id: int = Field(foreign_key="crawlpagerecord.id", index=True)
+    previous_page_record_id: int = Field(foreign_key="crawlpagerecord.id", index=True)
+    url: str = Field(index=True)
+    current_completed_at: datetime = Field(
+        sa_column=Column(UTCDateTime(), nullable=False, index=True),
+    )
+    profile: str
+    currency: str
