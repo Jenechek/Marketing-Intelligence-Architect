@@ -10,6 +10,7 @@
 <main class="page-shell structure-shell">
     <header class="page-header"><div><p class="eyebrow">Подробности страницы</p><h1>{{ site.name }}</h1><p class="lead break-text">{{ page.url }}</p></div><a class="secondary-action" href="{{ return_url }}">Вернуться к карте</a></header>
     {% if selected.run.status == 'partial' %}<div class="notice error" role="status">Карта может быть неполной: выбранный обход завершён частично.</div>{% endif %}
+    {% if selected.run.limited %}<div class="notice error" role="status">При обходе достигнуто ограничение. Структурный анализ может быть неполным.</div>{% endif %}
     <section class="content-card" aria-labelledby="page-title">
         <div class="section-heading"><div><h2 id="page-title">Страница</h2><p>{{ page.outcome_title }}</p></div>{% if external_url %}<a class="secondary-action" href="{{ external_url }}" target="_blank" rel="noopener noreferrer">Открыть URL</a>{% endif %}</div>
         <dl class="summary-list">
@@ -24,8 +25,17 @@
             <div><dt>Исходящих внутренних ссылок</dt><dd>{{ page.outgoing_count }}</dd></div>
             <div><dt>Битых исходящих</dt><dd>{{ page.broken_outgoing_count }}</dd></div>
             <div><dt>Не проверенных исходящих</dt><dd>{{ page.unchecked_outgoing_count }}</dd></div>
+            <div><dt>PageRank</dt><dd>{% if page_analysis.pagerank is not none %}{{ '%.12g'|format(page_analysis.pagerank) }}{% elif selected.structure.analysis.pagerank_error %}Ошибка расчёта{% else %}Неприменимо{% endif %}</dd></div>
+            <div><dt>Место по PageRank</dt><dd>{% if page_analysis.pagerank_rank is not none %}№ {{ page_analysis.pagerank_rank }} из {{ selected.structure.analysis.html_page_count }}{% else %}Неприменимо{% endif %}</dd></div>
         </dl>
+        <p class="field-help">PageRank — расчётный относительный показатель текущей HTML-карты. Он не доказывает важность страницы и не является рекомендацией.</p>
+        {% if selected.structure.analysis.pagerank_error %}<div class="notice error" role="alert">PageRank нельзя достоверно рассчитать: {{ selected.structure.analysis.pagerank_error }}</div>{% endif %}
         <details class="technical-settings"><summary>Фактическое сообщение обработки</summary><p class="break-text">{{ page.message }}</p></details>
+    </section>
+    <section class="content-card" aria-labelledby="signals-title">
+        <div class="section-heading"><h2 id="signals-title">Структурные сигналы</h2><span class="count">{{ page_analysis.signals|length }}</span></div>
+        {% if page_analysis.signals %}<ul class="link-detail-list">{% for signal in page_analysis.signals %}<li><strong>{% if signal.value == 'dead_end' and page_analysis.dead_end_is_page %}Тупиковая страница{% else %}{{ signal_titles[signal] }}{% endif %}</strong>{% if signal.value == 'bottleneck' %}<p>После исключения страницы становятся недостижимыми {{ page_analysis.bottleneck_affected_count }} других страниц.</p>{% endif %}</li>{% endfor %}</ul>{% else %}<p>Для этой страницы структурные сигналы не обнаружены.</p>{% endif %}
+        {% if cycle_component %}<h3>Состав циклической ловушки</h3><ul class="link-detail-list">{% for member in cycle_component %}<li><a href="/sites/{{ site.id }}/structure/pages/{{ member.record_id }}{% if state_query %}?{{ state_query }}{% endif %}">{{ member.url }}</a></li>{% endfor %}</ul>{% endif %}
     </section>
     <section class="content-card" aria-labelledby="incoming-title"><div class="section-heading"><h2 id="incoming-title">Входящие страницы</h2><span class="count">{{ incoming|length }}</span></div>{% if incoming %}<ul class="link-detail-list">{% for source in incoming %}<li><a href="/sites/{{ site.id }}/structure/pages/{{ source.record_id }}{% if state_query %}?{{ state_query }}{% endif %}">{{ source.url }}</a></li>{% endfor %}</ul>{% else %}<p>Сохранённых страниц-источников нет.</p>{% endif %}</section>
     <section class="content-card" aria-labelledby="outgoing-title"><div class="section-heading"><h2 id="outgoing-title">Исходящие внутренние ссылки</h2><span class="count">{{ page.outgoing|length }}</span></div>{% if page.outgoing %}<ul class="link-detail-list">{% for link in page.outgoing %}<li><div>{% if link.target_record_id %}<a href="/sites/{{ site.id }}/structure/pages/{{ link.target_record_id }}{% if state_query %}?{{ state_query }}{% endif %}">{{ link.url }}</a>{% else %}<span class="break-text">{{ link.url }}</span>{% endif %}<strong>{{ link.state_title }}{% if link.http_status is not none %} (HTTP {{ link.http_status }}){% endif %}</strong></div></li>{% endfor %}</ul>{% else %}<p>В сохранённом снимке исходящих внутренних ссылок нет.</p>{% endif %}</section>

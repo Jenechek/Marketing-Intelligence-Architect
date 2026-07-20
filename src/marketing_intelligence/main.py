@@ -67,7 +67,12 @@ from .crawl_settings import default_crawl_form, parse_crawl_settings
 from .crawler import CrawlSettings, Crawler
 from .logging_config import configure_logging
 from .models import Site
-from .site_structure import OUTCOME_TITLES, StructureDataError
+from .site_structure import (
+    OUTCOME_TITLES,
+    SIGNAL_TITLES,
+    StructuralSignal,
+    StructureDataError,
+)
 from .site_structure_filters import (
     PAGES_PER_PAGE,
     StructureFilterState,
@@ -1218,6 +1223,7 @@ def create_app(
             "outcome": request.query_params.get("outcome", ""),
             "broken": request.query_params.get("broken", ""),
             "unchecked": request.query_params.get("unchecked", ""),
+            "signal": request.query_params.get("signal", ""),
             "page": request.query_params.get("page", "1"),
         }
         state, errors = parse_structure_filters(**raw)
@@ -1233,8 +1239,17 @@ def create_app(
                 status_code=500,
             )
         if state is None:
-            state = StructureFilterState("", "", "", "", "", "1", None, None, None, None, 1)
-        filtered = filter_structure_pages(selected.structure.pages, state) if selected else ()
+            state = StructureFilterState(
+                url_value="", depth_value="", outcome_value="", broken_value="",
+                unchecked_value="", signal_value="", page_value="1", depth=None,
+                outcome=None, broken=None, unchecked=None, signal=None, page=1,
+            )
+        filtered = (
+            filter_structure_pages(
+                selected.structure.pages, selected.structure.analysis.pages, state
+            )
+            if selected else ()
+        )
         total_pages = max(1, (len(filtered) + PAGES_PER_PAGE - 1) // PAGES_PER_PAGE)
         if not errors and filtered and state.page > total_pages:
             errors["page"] = "Номер страницы выходит за пределы результатов."
@@ -1270,6 +1285,14 @@ def create_app(
                 "graph_edge_rows": graph_edge_rows,
                 "graph_limited": graph_limited,
                 "outcome_titles": OUTCOME_TITLES,
+                "signal_titles": SIGNAL_TITLES,
+                "signal_counts": {
+                    signal: selected.structure.analysis.signal_count(signal)
+                    for signal in StructuralSignal
+                } if selected else {},
+                "analysis_by_id": {
+                    item.record_id: item for item in selected.structure.analysis.pages
+                } if selected else {},
                 "structure_url": structure_url,
                 "to_local_datetime": to_event_local_datetime,
                 "state_query": state.query(),
@@ -1292,6 +1315,7 @@ def create_app(
             "outcome": request.query_params.get("outcome", ""),
             "broken": request.query_params.get("broken", ""),
             "unchecked": request.query_params.get("unchecked", ""),
+            "signal": request.query_params.get("signal", ""),
             "page": request.query_params.get("page", "1"),
         }
         state, errors = parse_structure_filters(**raw)
@@ -1335,6 +1359,8 @@ def create_app(
             )
         by_id = {item.record_id: item for item in selected.structure.pages}
         incoming = tuple(by_id[item] for item in page.incoming_record_ids)
+        page_analysis = selected.structure.analysis.page_by_id(page_id)
+        assert page_analysis is not None
         return templates.TemplateResponse(
             request=request,
             name="site_structure_detail.html",
@@ -1343,6 +1369,11 @@ def create_app(
                 "selected": selected,
                 "page": page,
                 "incoming": incoming,
+                "page_analysis": page_analysis,
+                "signal_titles": SIGNAL_TITLES,
+                "cycle_component": tuple(
+                    by_id[item] for item in page_analysis.cycle_component_record_ids
+                ),
                 "return_url": structure_url(site_id, state),
                 "state_query": state.query(),
                 "external_url": safe_external_url(page.url),

@@ -243,6 +243,13 @@ def test_map_filters_paginates_details_and_preserves_return_state(tmp_path: Path
         assert 'href="/sites/1/structure?depth=0&amp;broken=yes"' in detail.text
         incoming = client.get(f"/sites/1/structure/pages/{broken.id}?depth=0&broken=yes")
         assert "https://example.test/" in incoming.text
+        second_page = client.get("/sites/1/structure?page=2")
+        assert second_page.status_code == 200
+        assert "https://example.test/page-22" in second_page.text
+        second_detail = client.get(
+            "/sites/1/structure/pages/22?page=2"
+        )
+        assert 'href="/sites/1/structure?page=2"' in second_detail.text
         assert client.get("/sites/1/structure?depth=-1").status_code == 422
         assert client.get("/sites/1/structure?outcome=unknown").status_code == 422
         assert client.get("/sites/1/structure?page=99").status_code == 422
@@ -267,6 +274,52 @@ def test_graph_refuses_more_than_100_nodes_until_filter_is_applied(tmp_path: Pat
         assert filtered.status_code == 200
         assert "<svg" in filtered.text
         assert "https://large.test/node-100" in filtered.text
+
+
+def test_signal_filter_summary_and_detail_preserve_full_return_state(tmp_path: Path):
+    app, _ = build_app(tmp_path)
+    with TestClient(app) as client:
+        with Session(app.state.engine, expire_on_commit=False) as session:
+            site = seed_site(session)
+            run = seed_run(session, site.id, status="partial", limited=True)
+            start = seed_page(
+                session, run.id, 1, "https://example.test/",
+                links=["https://example.test/trap-a", "https://example.test/asset"],
+            )
+            trap_a = seed_page(
+                session, run.id, 2, "https://example.test/trap-a", depth=1,
+                links=["https://example.test/trap-b"],
+            )
+            seed_page(
+                session, run.id, 3, "https://example.test/trap-b", depth=2,
+                links=["https://example.test/trap-a"],
+            )
+            seed_page(
+                session, run.id, 4, "https://example.test/asset", depth=1,
+                outcome="non_html",
+            )
+            session.commit()
+
+        response = client.get(
+            f"/sites/{site.id}/structure?signal=cycle_trap&page=1"
+        )
+        assert response.status_code == 200
+        assert "Циклическая ловушка" in response.text
+        assert "https://example.test/trap-a" in response.text
+        assert "https://example.test/asset" not in response.text
+        assert "PageRank — расчётный относительный показатель" in response.text
+        detail = client.get(
+            f"/sites/{site.id}/structure/pages/{trap_a.id}?signal=cycle_trap&page=1"
+        )
+        assert detail.status_code == 200
+        assert "Состав циклической ловушки" in detail.text
+        assert "https://example.test/trap-b" in detail.text
+        assert "При обходе достигнуто ограничение" in detail.text
+        assert 'href="/sites/1/structure?signal=cycle_trap"' in detail.text
+        assert client.get(f"/sites/{site.id}/structure?signal=unknown").status_code == 422
+        assert client.get(
+            f"/sites/{site.id}/structure/pages/{start.id}?signal=unknown"
+        ).status_code == 422
 
 
 def test_invalid_filters_are_visible_without_a_run_and_with_an_empty_run(tmp_path: Path):

@@ -50,6 +50,7 @@
             <div><dt>Статус</dt><dd>{% if selected.run.status == 'partial' %}Завершён частично{% else %}Завершён{% endif %}</dd></div>
             <div><dt>Ограничение обхода</dt><dd>{% if selected.run.limited %}Достигнуто{% else %}Не достигнуто{% endif %}</dd></div>
             <div><dt>Страниц</dt><dd>{{ selected.structure.pages|length }}</dd></div>
+            <div><dt>HTML-страниц в анализе</dt><dd>{{ selected.structure.analysis.html_page_count }}</dd></div>
         </dl>
         {% if selected.run.status == 'partial' %}<div class="notice error" role="status">Карта может быть неполной: выбранный обход завершён частично.</div>{% endif %}
         {% if selected.run.limited %}<div class="notice error" role="status">При обходе достигнуто ограничение. Часть внутренних ссылок могла остаться непроверенной.</div>{% endif %}
@@ -58,6 +59,18 @@
     {% if not selected.structure.pages %}
     <section class="content-card empty-state"><h2>В обходе нет страниц</h2><p>Запуск завершён без сохранённых обработанных URL.</p></section>
     {% else %}
+    <section class="content-card" aria-labelledby="analysis-title">
+        <div class="section-heading"><div><h2 id="analysis-title">Структурный анализ</h2><p>Расчёты выполнены по полной HTML-карте выбранного обхода, независимо от фильтров ниже.</p></div></div>
+        {% if selected.structure.analysis.pagerank_error %}<div class="notice error" role="alert">PageRank нельзя достоверно рассчитать: {{ selected.structure.analysis.pagerank_error }}</div>
+        {% elif selected.structure.analysis.html_page_count == 0 %}<div class="notice" role="status">PageRank неприменим: в выбранном обходе нет HTML-страниц.</div>
+        {% else %}<p>PageRank — расчётный относительный показатель текущей карты. Он не доказывает важность страницы и не является рекомендацией.</p>{% endif %}
+        {% if not selected.structure.analysis.low_connectivity_applicable %}<p class="field-help">Для сигнала недостаточной связности недостаточно подходящих данных: нужно не менее 10 достижимых HTML-страниц без стартовой страницы и островов.</p>{% endif %}
+        {% if not selected.structure.analysis.anomalous_depth_applicable %}<p class="field-help">Для сигнала аномальной глубины недостаточно данных: нужно не менее 10 достижимых HTML-страниц.</p>{% endif %}
+        <dl class="summary-list signal-summary">
+            {% for signal, title in signal_titles.items() %}<div><dt>{{ title }}</dt><dd>{{ signal_counts[signal] }}</dd></div>{% endfor %}
+        </dl>
+    </section>
+
     <section class="content-card" aria-labelledby="filters-title">
         <div class="section-heading"><div><h2 id="filters-title">Фильтры</h2><p>Фильтры применяются к списку, дереву и графу.</p></div></div>
         <form class="filter-form" method="get" action="/sites/{{ site.id }}/structure" novalidate>
@@ -67,6 +80,7 @@
                 <div class="field"><label for="outcome">Результат обработки</label><select id="outcome" name="outcome" {% if errors.outcome %}aria-invalid="true" aria-describedby="outcome-error"{% endif %}><option value="">Все</option>{% for value, title in outcome_titles.items() %}<option value="{{ value }}" {% if form.outcome == value %}selected{% endif %}>{{ title }}</option>{% endfor %}</select>{% if errors.outcome %}<p class="field-error" id="outcome-error">{{ errors.outcome }}</p>{% endif %}</div>
                 <div class="field"><label for="broken">Битые исходящие</label><select id="broken" name="broken" {% if errors.broken %}aria-invalid="true" aria-describedby="broken-error"{% endif %}><option value="">Все</option><option value="yes" {% if form.broken == 'yes' %}selected{% endif %}>Есть</option><option value="no" {% if form.broken == 'no' %}selected{% endif %}>Нет</option></select>{% if errors.broken %}<p class="field-error" id="broken-error">{{ errors.broken }}</p>{% endif %}</div>
                 <div class="field"><label for="unchecked">Непроверенные исходящие</label><select id="unchecked" name="unchecked" {% if errors.unchecked %}aria-invalid="true" aria-describedby="unchecked-error"{% endif %}><option value="">Все</option><option value="yes" {% if form.unchecked == 'yes' %}selected{% endif %}>Есть</option><option value="no" {% if form.unchecked == 'no' %}selected{% endif %}>Нет</option></select>{% if errors.unchecked %}<p class="field-error" id="unchecked-error">{{ errors.unchecked }}</p>{% endif %}</div>
+                <div class="field"><label for="signal">Структурный сигнал</label><select id="signal" name="signal" {% if errors.signal %}aria-invalid="true" aria-describedby="signal-error"{% endif %}><option value="">Все</option>{% for value, title in signal_titles.items() %}<option value="{{ value.value }}" {% if form.signal == value.value %}selected{% endif %}>{{ title }}</option>{% endfor %}</select>{% if errors.signal %}<p class="field-error" id="signal-error">{{ errors.signal }}</p>{% endif %}</div>
             </div>
             {% if errors.page %}<p class="field-error">{{ errors.page }}</p>{% endif %}
             <div class="form-actions"><button class="primary-action" type="submit">Применить</button>{% if state.has_filters %}<a class="secondary-action" href="/sites/{{ site.id }}/structure">Сбросить</a>{% endif %}</div>
@@ -78,8 +92,8 @@
     {% else %}
     <section class="content-card" aria-labelledby="list-title">
         <div class="section-heading"><div><h2 id="list-title">Страницы</h2><p>Результаты упорядочены по порядку обхода.</p></div><span class="count">{{ filtered|length }}</span></div>
-        <div class="table-scroll"><table class="structure-table"><thead><tr><th>URL</th><th>Глубина</th><th>Результат</th><th>Входящие</th><th>Исходящие</th><th>Битые</th><th>Не проверены</th></tr></thead><tbody>
-            {% for item in page_items %}<tr><td><a href="{{ detail_href(item.record_id) }}">{{ item.url }}</a></td><td>{{ item.depth }}</td><td>{{ item.outcome_title }}{% if item.http_status is not none %} (HTTP {{ item.http_status }}){% endif %}</td><td>{{ item.incoming_count }}</td><td>{{ item.outgoing_count }}</td><td>{{ item.broken_outgoing_count }}</td><td>{{ item.unchecked_outgoing_count }}</td></tr>{% endfor %}
+        <div class="table-scroll"><table class="structure-table"><thead><tr><th>URL</th><th>Глубина</th><th>Результат</th><th>PageRank / место</th><th>Структурные сигналы</th><th>Входящие</th><th>Исходящие</th><th>Битые</th><th>Не проверены</th></tr></thead><tbody>
+            {% for item in page_items %}{% set item_analysis = analysis_by_id[item.record_id] %}<tr><td><a href="{{ detail_href(item.record_id) }}">{{ item.url }}</a></td><td>{{ item.depth }}</td><td>{{ item.outcome_title }}{% if item.http_status is not none %} (HTTP {{ item.http_status }}){% endif %}</td><td>{% if item_analysis.pagerank is not none %}{{ '%.12g'|format(item_analysis.pagerank) }}<br><span class="tree-meta">№ {{ item_analysis.pagerank_rank }} из {{ selected.structure.analysis.html_page_count }}</span>{% else %}Неприменимо{% endif %}</td><td>{% if item_analysis.signals %}<ul class="signal-list">{% for signal in item_analysis.signals %}<li>{% if signal.value == 'dead_end' and item_analysis.dead_end_is_page %}Тупиковая страница{% else %}{{ signal_titles[signal] }}{% endif %}{% if signal.value == 'bottleneck' %}: затронуто {{ item_analysis.bottleneck_affected_count }}{% endif %}</li>{% endfor %}</ul>{% else %}Не обнаружены{% endif %}</td><td>{{ item.incoming_count }}</td><td>{{ item.outgoing_count }}</td><td>{{ item.broken_outgoing_count }}</td><td>{{ item.unchecked_outgoing_count }}</td></tr>{% endfor %}
         </tbody></table></div>
         {% if total_pages > 1 %}<nav class="pagination" aria-label="Страницы списка"><span>Страница {{ page_number }} из {{ total_pages }}</span><div class="form-actions">{% if page_number > 1 %}<a class="secondary-action" href="{{ structure_url(site.id, state, page=page_number - 1) }}">Назад</a>{% endif %}{% if page_number < total_pages %}<a class="secondary-action" href="{{ structure_url(site.id, state, page=page_number + 1) }}">Далее</a>{% endif %}</div></nav>{% endif %}
     </section>

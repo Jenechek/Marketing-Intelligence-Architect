@@ -3,7 +3,12 @@
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
-from .site_structure import OUTCOME_TITLES, StructurePage
+from .site_structure import (
+    OUTCOME_TITLES,
+    PageStructureAnalysis,
+    StructuralSignal,
+    StructurePage,
+)
 
 
 PAGES_PER_PAGE = 20
@@ -17,16 +22,21 @@ class StructureFilterState:
     outcome_value: str
     broken_value: str
     unchecked_value: str
+    signal_value: str
     page_value: str
     depth: int | None
     outcome: str | None
     broken: bool | None
     unchecked: bool | None
+    signal: StructuralSignal | None
     page: int
 
     @property
     def has_filters(self) -> bool:
-        return bool(self.url_value or self.depth_value or self.outcome_value or self.broken_value or self.unchecked_value)
+        return bool(
+            self.url_value or self.depth_value or self.outcome_value
+            or self.broken_value or self.unchecked_value or self.signal_value
+        )
 
     def query(self, *, page: int | None = None) -> str:
         values = [
@@ -35,6 +45,7 @@ class StructureFilterState:
             ("outcome", self.outcome_value),
             ("broken", self.broken_value),
             ("unchecked", self.unchecked_value),
+            ("signal", self.signal_value),
         ]
         target_page = self.page if page is None else page
         if target_page != 1:
@@ -43,7 +54,8 @@ class StructureFilterState:
 
 
 def parse_structure_filters(
-    *, url: str, depth: str, outcome: str, broken: str, unchecked: str, page: str
+    *, url: str, depth: str, outcome: str, broken: str, unchecked: str,
+    signal: str, page: str
 ) -> tuple[StructureFilterState | None, dict[str, str]]:
     errors: dict[str, str] = {}
     if len(url) > 2048 or any(ord(character) < 32 for character in url):
@@ -63,6 +75,12 @@ def parse_structure_filters(
         errors["broken"] = "Выберите допустимое состояние битых ссылок."
     if unchecked not in BOOLEAN_FILTERS:
         errors["unchecked"] = "Выберите допустимое состояние непроверенных ссылок."
+    parsed_signal: StructuralSignal | None = None
+    if signal:
+        try:
+            parsed_signal = StructuralSignal(signal)
+        except ValueError:
+            errors["signal"] = "Выберите один из доступных структурных сигналов."
     try:
         parsed_page = int(page)
         if str(parsed_page) != page or parsed_page < 1:
@@ -73,17 +91,21 @@ def parse_structure_filters(
     if errors:
         return None, errors
     return StructureFilterState(
-        url, depth, outcome, broken, unchecked, page, parsed_depth, parsed_outcome,
+        url, depth, outcome, broken, unchecked, signal, page, parsed_depth, parsed_outcome,
         None if not broken else broken == "yes",
         None if not unchecked else unchecked == "yes",
+        parsed_signal,
         parsed_page,
     ), {}
 
 
 def filter_structure_pages(
-    pages: tuple[StructurePage, ...], state: StructureFilterState
+    pages: tuple[StructurePage, ...],
+    analyses: tuple[PageStructureAnalysis, ...],
+    state: StructureFilterState,
 ) -> tuple[StructurePage, ...]:
     needle = state.url_value.casefold()
+    analysis_by_id = {item.record_id: item for item in analyses}
     return tuple(
         page for page in pages
         if (not needle or needle in page.url.casefold())
@@ -91,6 +113,10 @@ def filter_structure_pages(
         and (state.outcome is None or page.outcome == state.outcome)
         and (state.broken is None or (page.broken_outgoing_count > 0) is state.broken)
         and (state.unchecked is None or (page.unchecked_outgoing_count > 0) is state.unchecked)
+        and (
+            state.signal is None
+            or analysis_by_id[page.record_id].has_signal(state.signal)
+        )
     )
 
 
