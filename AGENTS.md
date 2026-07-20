@@ -81,6 +81,10 @@ During and after editing:
 4. Update only affected documentation.
 5. After successful completion, update `TASKS.md` and `PROJECT_LOG.md`; update `README.md`, `ROADMAP.md`, `CHANGELOG.md`, `DECISIONS.md`, or `PROJECT.md` only when their subject actually changed.
 
+When defining tasks, prefer the largest coherent scope that combines closely related work and can still be implemented, verified, reviewed, and accepted efficiently in one branch and pull request. Do not split work merely to minimize task size when shared context and checks make a broader task more efficient.
+
+Maintaining Codex effectiveness is mandatory. Never enlarge a task if doing so makes requirements less clear, increases context switching or rework, obscures failure isolation, weakens testing or review, raises data risk, or slows delivery of a verified result. Split the task as soon as any of these effects is expected; task volume is useful only while implementation and verification efficiency do not deteriorate.
+
 Tasks must follow the approved order. Do not begin the next task before the current one is implemented, verified, documented, and accepted. Record blockers in `TASKS.md` rather than skipping ahead.
 
 ## Token-efficient operation
