@@ -40,9 +40,22 @@
                     <div>
                         <strong>{{ site.name }}</strong>
                         <a href="{{ site.url }}" target="_blank" rel="noopener noreferrer">{{ site.url }}</a>
+                        {% set schedule_summary = schedule_summaries.get(site.id) %}
+                        {% if schedule_summary and schedule_summary.enabled %}
+                        <p class="event-meta">Расписание включено{% if schedule_summary.next_run_at %}; следующий запуск {{ to_local_datetime(schedule_summary.next_run_at) }}{% endif %}.</p>
+                        {% else %}
+                        <p class="event-meta">Расписание выключено.</p>
+                        {% endif %}
+                        {% if schedule_summary and schedule_summary.last_status %}
+                        <p class="event-meta">Последний автоматический результат: {{ scheduled_status_title(schedule_summary.last_status) }}.</p>
+                        {% if schedule_summary.last_status in ('partial', 'deferred', 'failed', 'interrupted', 'missed') %}
+                        <p class="attention-text">Автоматическая проверка требует внимания.</p>
+                        {% endif %}
+                        {% endif %}
                     </div>
                     <div class="site-actions">
                         <span class="site-status">Добавлен</span>
+                        <a class="secondary-action" href="/sites/{{ site.id }}/schedule">Расписание</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/structure">Структура</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/changes">Изменения</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/crawl">Полный обход</a>

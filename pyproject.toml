@@ -9,6 +9,7 @@ description = "Локальная основа приложения Marketing In
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "APScheduler>=3.11.3,<4.0",
     "beautifulsoup4>=4.13,<5.0",
     "fastapi>=0.115,<1.0",
     "httpx>=0.28,<1.0",
