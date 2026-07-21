@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from fractions import Fraction
 
-from sqlalchemy import CheckConstraint, Column, DateTime, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Text, UniqueConstraint
 from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
@@ -40,6 +40,110 @@ class Site(SQLModel, table=True):
     name: str = Field(index=True)
     url: str
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class SiteSchedule(SQLModel, table=True):
+    """Сохраняемое правило автоматического полного обхода одного сайта."""
+
+    __table_args__ = (
+        UniqueConstraint("site_id", name="uq_site_schedule_site"),
+        CheckConstraint(
+            "frequency IN ('daily', 'weekly')",
+            name="ck_site_schedule_frequency",
+        ),
+        CheckConstraint(
+            "local_weekday >= 0 AND local_weekday <= 6",
+            name="ck_site_schedule_weekday",
+        ),
+        CheckConstraint("max_pages >= 1", name="ck_site_schedule_max_pages"),
+        CheckConstraint("max_depth >= 0", name="ck_site_schedule_max_depth"),
+        CheckConstraint("delay >= 0", name="ck_site_schedule_delay"),
+        CheckConstraint("timeout > 0", name="ck_site_schedule_timeout"),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    site_id: int = Field(foreign_key="site.id", index=True)
+    enabled: bool = Field(sa_column=Column(Boolean, nullable=False, default=False))
+    frequency: str = Field(default="weekly")
+    local_weekday: int
+    local_time: str = Field(default="09:00")
+    next_run_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True, index=True),
+    )
+    max_pages: int
+    max_depth: int
+    delay: float
+    timeout: float
+    user_agent: str
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+
+
+class ScheduledCrawlEntry(SQLModel, table=True):
+    """Журнал автоматических запусков и сохраняемая последовательная очередь."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "schedule_id",
+            "scheduled_for",
+            name="uq_scheduled_crawl_entry_schedule_moment",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'partial', 'deferred', "
+            "'failed', 'interrupted', 'missed', 'cancelled')",
+            name="ck_scheduled_crawl_entry_status",
+        ),
+        CheckConstraint(
+            "notification_status IN ('not_applicable', 'disabled', 'pending', "
+            "'sent', 'failed')",
+            name="ck_scheduled_crawl_entry_notification",
+        ),
+        CheckConstraint(
+            "missed_periods >= 0",
+            name="ck_scheduled_crawl_entry_missed_periods",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    site_id: int = Field(foreign_key="site.id", index=True)
+    schedule_id: int | None = Field(
+        default=None,
+        foreign_key="siteschedule.id",
+        index=True,
+    )
+    scheduled_for: datetime = Field(
+        sa_column=Column(UTCDateTime(), nullable=False, index=True),
+    )
+    started_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+    completed_at: datetime | None = Field(
+        default=None,
+        sa_column=Column(UTCDateTime(), nullable=True),
+    )
+    status: str = Field(index=True)
+    message: str = Field(sa_column=Column(Text, nullable=False))
+    crawl_run_id: int | None = Field(
+        default=None,
+        foreign_key="crawlrun.id",
+        index=True,
+    )
+    max_pages: int
+    max_depth: int
+    delay: float
+    timeout: float
+    user_agent: str
+    retry_of_id: int | None = Field(
+        default=None,
+        foreign_key="scheduledcrawlentry.id",
+        index=True,
+    )
+    missed_periods: int = Field(default=0)
+    notification_status: str = Field(default="not_applicable")
 
 
 class AvailabilityCheck(SQLModel, table=True):

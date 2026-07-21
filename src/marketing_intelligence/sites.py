@@ -17,6 +17,7 @@ from .models import (
     Site,
     SnapshotChangeEvent,
 )
+from .scheduler import delete_schedule_data
 
 
 class ActiveSiteCrawlError(RuntimeError):
@@ -124,6 +125,7 @@ def delete_site(engine: Engine, site_id: int) -> bool:
         session.exec(
             delete(AvailabilityCheck).where(AvailabilityCheck.site_id == site_id)
         )
+        delete_schedule_data(session, site_id)
         run_ids = select(CrawlRun.id).where(CrawlRun.site_id == site_id)
         page_ids = select(CrawlPageRecord.id).where(
             CrawlPageRecord.crawl_run_id.in_(run_ids)

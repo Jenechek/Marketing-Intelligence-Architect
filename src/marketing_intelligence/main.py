@@ -3,9 +3,13 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 import secrets
+from typing import Callable
 from urllib.parse import parse_qs
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
@@ -41,12 +45,15 @@ from .change_event_query import has_change_events, load_change_events
 from .change_event_view_state import set_change_event_viewed
 from .confirmation import (
     CHECK_AVAILABILITY_ACTION,
+    SAVE_SCHEDULE_ACTION,
     START_CRAWL_ACTION,
+    TEST_SMTP_ACTION,
     change_event_view_action,
     create_action_token,
     create_delete_confirmation_token,
     validate_delete_confirmation_token,
     validate_action_token,
+    retry_scheduled_crawl_action,
 )
 from .config import Settings
 from .database import build_engine, initialize_database
@@ -65,8 +72,27 @@ from .crawl_history import (
 )
 from .crawl_settings import default_crawl_form, parse_crawl_settings
 from .crawler import CrawlSettings, Crawler
+from .crawl_dispatcher import CrawlQueueDispatcher
 from .logging_config import configure_logging
 from .models import Site
+from .scheduler import (
+    FREQUENCY_TITLES,
+    RETRYABLE,
+    WEEKDAY_TITLES,
+    count_schedule_data,
+    create_retry,
+    default_schedule_form,
+    get_schedule,
+    list_entries,
+    load_schedule_summaries,
+    parse_schedule_form,
+    notification_status_title,
+    reconcile_missed_schedules,
+    recover_interrupted_entries,
+    save_schedule,
+    schedule_to_form,
+    status_title as scheduled_status_title,
+)
 from .site_structure import (
     OUTCOME_TITLES,
     SIGNAL_TITLES,
@@ -91,6 +117,7 @@ from .sites import (
     update_site,
     validate_site,
 )
+from .smtp_notifications import MailTransport, SMTPNotifier
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -102,10 +129,13 @@ def create_app(
     *,
     availability_checker: AvailabilityChecker | None = None,
     crawler: Crawler | None = None,
+    smtp_transport: MailTransport | None = None,
+    now_provider: Callable[[], datetime] | None = None,
 ) -> FastAPI:
     """Создать приложение с переданными или локальными настройками."""
 
     active_settings = settings or Settings.from_environment()
+    clock = now_provider or (lambda: datetime.now(UTC))
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -116,6 +146,12 @@ def create_app(
         engine = build_engine(active_settings.database_url)
         initialize_database(engine)
         recover_interrupted_runs(engine)
+        recover_interrupted_entries(engine, now=clock())
+        reconcile_missed_schedules(
+            engine,
+            now=clock(),
+            local_timezone=active_settings.local_timezone,
+        )
 
         application.state.settings = active_settings
         application.state.engine = engine
@@ -123,12 +159,41 @@ def create_app(
         application.state.action_token_secret = secrets.token_bytes(32)
         application.state.availability_checker = availability_checker or AvailabilityChecker()
         application.state.crawler = crawler or Crawler()
+        application.state.smtp_notifier = SMTPNotifier(
+            active_settings.smtp,
+            transport=smtp_transport,
+        )
+        application.state.crawl_dispatcher = CrawlQueueDispatcher(
+            engine,
+            application.state.crawler,
+            application.state.smtp_notifier,
+            logger,
+            local_timezone=active_settings.local_timezone,
+        )
+        await application.state.crawl_dispatcher.send_pending_notifications()
+        scheduler = AsyncIOScheduler(timezone=UTC)
+
+        async def scheduler_tick() -> None:
+            await application.state.crawl_dispatcher.wake(now=clock())
+
+        scheduler.add_job(
+            scheduler_tick,
+            "interval",
+            seconds=1,
+            coalesce=True,
+            max_instances=1,
+            id="crawl-queue-wakeup",
+        )
+        scheduler.start()
+        application.state.scheduler = scheduler
         application.state.crawl_tasks = set()
         logger.info("Marketing Intelligence запущен")
 
         try:
             yield
         finally:
+            scheduler.shutdown(wait=False)
+            await application.state.crawl_dispatcher.shutdown()
             tasks = tuple(application.state.crawl_tasks)
             for task in tasks:
                 task.cancel()
@@ -155,11 +220,19 @@ def create_app(
         errors: dict[str, str] | None = None,
         status_code: int = 200,
     ) -> HTMLResponse:
+        sites = list_sites(request.app.state.engine)
+        summaries = load_schedule_summaries(
+            request.app.state.engine,
+            [site.id for site in sites if site.id is not None],
+        )
         return templates.TemplateResponse(
             request=request,
             name="index.html",
             context={
-                "sites": list_sites(request.app.state.engine),
+                "sites": sites,
+                "schedule_summaries": summaries,
+                "scheduled_status_title": scheduled_status_title,
+                "to_local_datetime": to_local_datetime,
                 "form": form or {"name": "", "url": ""},
                 "errors": errors or {},
                 "created": request.query_params.get("created") == "1",
@@ -389,6 +462,84 @@ def create_app(
             request=request,
             name="crawl_not_found.html",
             status_code=404,
+        )
+
+    def render_schedule_screen(
+        request: Request,
+        site: Site,
+        *,
+        form: dict[str, str] | None = None,
+        errors: dict[str, str] | None = None,
+        status_code: int = 200,
+        action_error: str | None = None,
+    ) -> HTMLResponse:
+        schedule = get_schedule(request.app.state.engine, site.id)
+        raw_page = request.query_params.get("page", "1")
+        try:
+            page_number = int(raw_page)
+            if str(page_number) != raw_page or not 1 <= page_number <= 1_000_000:
+                raise ValueError
+        except ValueError:
+            page_number = 1
+            action_error = "Номер страницы должен быть положительным целым числом."
+            status_code = 422
+        history = list_entries(request.app.state.engine, site.id, page_number)
+        smtp = active_settings.smtp
+        smtp_state = (
+            "Настроен"
+            if smtp.enabled
+            else (f"Ошибка настройки: {smtp.error}" if smtp.error else "Выключен")
+        )
+        retry_tokens = {
+            entry.id: create_action_token(
+                request.app.state.action_token_secret,
+                site.id,
+                retry_scheduled_crawl_action(entry.id),
+            )
+            for entry in history.entries
+            if entry.id is not None and entry.status in RETRYABLE
+        }
+        return templates.TemplateResponse(
+            request=request,
+            name="schedule.html",
+            context={
+                "site": site,
+                "schedule": schedule,
+                "form": form
+                or (
+                    schedule_to_form(schedule)
+                    if schedule is not None
+                    else default_schedule_form(
+                        local_timezone=active_settings.local_timezone,
+                        now=clock(),
+                    )
+                ),
+                "errors": errors or {},
+                "action_error": action_error,
+                "history": history,
+                "frequency_titles": FREQUENCY_TITLES,
+                "weekday_titles": WEEKDAY_TITLES,
+                "status_title": scheduled_status_title,
+                "notification_status_title": notification_status_title,
+                "retry_tokens": retry_tokens,
+                "to_local_datetime": to_event_local_datetime,
+                "smtp_state": smtp_state,
+                "smtp_enabled": smtp.enabled,
+                "save_token": create_action_token(
+                    request.app.state.action_token_secret,
+                    site.id,
+                    SAVE_SCHEDULE_ACTION,
+                ),
+                "smtp_test_token": create_action_token(
+                    request.app.state.action_token_secret,
+                    site.id,
+                    TEST_SMTP_ACTION,
+                ),
+                "saved": request.query_params.get("saved") == "1",
+                "retried": request.query_params.get("retried") == "1",
+                "email_test": request.query_params.get("email_test"),
+            },
+            status_code=status_code,
         )
 
     def render_structure_error(
@@ -1075,6 +1226,9 @@ def create_app(
             crawl_snapshot_count,
             crawl_price_count,
         ) = count_crawl_data(request.app.state.engine, site_id)
+        schedule_count, scheduled_entry_count = count_schedule_data(
+            request.app.state.engine, site_id
+        )
         return templates.TemplateResponse(
             request=request,
             name="delete_site.html",
@@ -1087,6 +1241,8 @@ def create_app(
                 "crawl_page_count": crawl_page_count,
                 "crawl_snapshot_count": crawl_snapshot_count,
                 "crawl_price_count": crawl_price_count,
+                "schedule_count": schedule_count,
+                "scheduled_entry_count": scheduled_entry_count,
                 "confirmation_token": create_delete_confirmation_token(
                     request.app.state.action_token_secret,
                     site_id,
@@ -1161,6 +1317,156 @@ def create_app(
         if site is None:
             return render_site_not_found(request)
         return render_crawl_screen(request, site)
+
+    @application.get("/sites/{site_id}/schedule", response_class=HTMLResponse)
+    async def schedule_screen(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        return render_schedule_screen(request, site)
+
+    @application.post("/sites/{site_id}/schedule", response_class=HTMLResponse)
+    async def update_schedule(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        raw = parse_qs(
+            (await request.body()).decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        token = raw.get("action_token", [""])[0]
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            SAVE_SCHEDULE_ACTION,
+            token,
+        ):
+            return render_schedule_screen(
+                request,
+                site,
+                status_code=403,
+                action_error="Токен изменения расписания недействителен.",
+            )
+        defaults = default_schedule_form(
+            local_timezone=active_settings.local_timezone,
+            now=clock(),
+        )
+        form = {
+            key: raw.get(key, ["" if key == "enabled" else default])[0]
+            for key, default in defaults.items()
+        }
+        values, errors = parse_schedule_form(form)
+        if errors:
+            return render_schedule_screen(
+                request,
+                site,
+                form=form,
+                errors=errors,
+                status_code=422,
+            )
+        assert values is not None
+        save_schedule(
+            request.app.state.engine,
+            site_id,
+            values,
+            now=clock(),
+            local_timezone=active_settings.local_timezone,
+        )
+        await request.app.state.crawl_dispatcher.wake(now=clock())
+        return RedirectResponse(
+            url=f"/sites/{site_id}/schedule?saved=1",
+            status_code=303,
+        )
+
+    @application.post(
+        "/sites/{site_id}/schedule/{entry_id}/retry",
+        response_class=HTMLResponse,
+    )
+    async def retry_scheduled_crawl(
+        request: Request, site_id: int, entry_id: int
+    ) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        raw = parse_qs(
+            (await request.body()).decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            retry_scheduled_crawl_action(entry_id),
+            raw.get("action_token", [""])[0],
+        ):
+            return render_schedule_screen(
+                request,
+                site,
+                status_code=403,
+                action_error="Токен ручного повтора недействителен.",
+            )
+        try:
+            create_retry(
+                request.app.state.engine,
+                site_id,
+                entry_id,
+                now=clock(),
+            )
+        except LookupError:
+            return render_schedule_screen(
+                request,
+                site,
+                status_code=404,
+                action_error="Запись журнала для этого сайта не найдена.",
+            )
+        except ValueError as error:
+            return render_schedule_screen(
+                request,
+                site,
+                status_code=409,
+                action_error=str(error),
+            )
+        await request.app.state.crawl_dispatcher.wake(now=clock())
+        return RedirectResponse(
+            url=f"/sites/{site_id}/schedule?retried=1",
+            status_code=303,
+        )
+
+    @application.post(
+        "/sites/{site_id}/schedule/test-email",
+        response_class=HTMLResponse,
+    )
+    async def test_schedule_email(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        raw = parse_qs(
+            (await request.body()).decode("utf-8", errors="replace"),
+            keep_blank_values=True,
+        )
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            TEST_SMTP_ACTION,
+            raw.get("action_token", [""])[0],
+        ):
+            return render_schedule_screen(
+                request,
+                site,
+                status_code=403,
+                action_error="Токен тестового письма недействителен.",
+            )
+        if not active_settings.smtp.enabled:
+            return render_schedule_screen(
+                request,
+                site,
+                status_code=409,
+                action_error="SMTP не настроен и тестовое письмо недоступно.",
+            )
+        sent = await request.app.state.smtp_notifier.send_test()
+        return RedirectResponse(
+            url=f"/sites/{site_id}/schedule?email_test={'sent' if sent else 'failed'}",
+            status_code=303,
+        )
 
     @application.post("/sites/{site_id}/crawl", response_class=HTMLResponse)
     async def start_site_crawl(request: Request, site_id: int) -> HTMLResponse:

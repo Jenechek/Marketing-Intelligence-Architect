@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Расписание — {{ site.name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+    <main class="page-shell narrow-shell">
+        <header class="page-header">
+            <div>
+                <p class="eyebrow">Автоматические полные обходы</p>
+                <h1>{{ site.name }}</h1>
+                <p class="lead">{{ site.url }}</p>
+            </div>
+            <a class="secondary-action" href="/">К сайтам</a>
+        </header>
+
+        <div class="notice" role="note">Локальный планировщик работает, пока запущен процесс FastAPI; открытый браузер не нужен. При остановленном приложении обходы не выполняются. Полностью автономный серверный режим относится к этапу 14.</div>
+        {% if saved %}<div class="notice success" role="status">Расписание сохранено.</div>{% endif %}
+        {% if retried %}<div class="notice success" role="status">Ручной повтор добавлен в очередь.</div>{% endif %}
+        {% if email_test == 'sent' %}<div class="notice success" role="status">Тестовое письмо отправлено.</div>{% endif %}
+        {% if email_test == 'failed' %}<div class="notice error" role="alert">Тестовое письмо отправить не удалось. Расписание продолжает работать.</div>{% endif %}
+        {% if action_error %}<div class="notice error" role="alert">{{ action_error }}</div>{% endif %}
+
+        <section class="content-card" aria-labelledby="schedule-title">
+            <div class="section-heading">
+                <div>
+                    <h2 id="schedule-title">Расписание</h2>
+                    {% if schedule and schedule.enabled %}
+                    <p>{{ frequency_titles[schedule.frequency] }} в {{ schedule.local_time }}{% if schedule.frequency == 'weekly' %}, {{ weekday_titles[schedule.local_weekday]|lower }}{% endif %}. Следующий запуск: {{ to_local_datetime(schedule.next_run_at) }}.</p>
+                    {% else %}
+                    <p>Расписание выключено. Сохранение включённого правила назначит первый запуск только на будущее.</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% if errors %}<div class="notice error" role="alert">Расписание не сохранено. Проверьте отмеченные поля.</div>{% endif %}
+            <form action="/sites/{{ site.id }}/schedule" method="post" novalidate>
+                <input type="hidden" name="action_token" value="{{ save_token }}">
+                <div class="field checkbox-row">
+                    <input id="enabled" name="enabled" type="checkbox" value="1"{% if form.enabled == '1' %} checked{% endif %}>
+                    <label for="enabled">Включить автоматические полные обходы</label>
+                </div>
+                <div class="field">
+                    <label for="frequency">Частота</label>
+                    <select id="frequency" name="frequency"{% if errors.frequency %} aria-invalid="true" aria-describedby="frequency-error"{% endif %}>
+                        {% for value, title in frequency_titles.items() %}<option value="{{ value }}"{% if form.frequency == value %} selected{% endif %}>{{ title }}</option>{% endfor %}
+                    </select>
+                    {% if errors.frequency %}<p class="field-error" id="frequency-error">{{ errors.frequency }}</p>{% endif %}
+                </div>
+                <div class="field">
+                    <label for="local_weekday">День недели</label>
+                    <select id="local_weekday" name="local_weekday"{% if errors.local_weekday %} aria-invalid="true" aria-describedby="weekday-error"{% endif %}>
+                        {% for title in weekday_titles %}<option value="{{ loop.index0 }}"{% if form.local_weekday == loop.index0|string %} selected{% endif %}>{{ title }}</option>{% endfor %}
+                    </select>
+                    <p class="field-help">Для ежедневного расписания день не влияет на запуск.</p>
+                    {% if errors.local_weekday %}<p class="field-error" id="weekday-error">{{ errors.local_weekday }}</p>{% endif %}
+                </div>
+                <div class="field">
+                    <label for="local_time">Локальное время</label>
+                    <input id="local_time" name="local_time" type="time" value="{{ form.local_time }}" required{% if errors.local_time %} aria-invalid="true" aria-describedby="time-error"{% endif %}>
+                    {% if errors.local_time %}<p class="field-error" id="time-error">{{ errors.local_time }}</p>{% endif %}
+                </div>
+                <details class="advanced-settings"{% if errors %} open{% endif %}>
+                    <summary>Расширенные настройки crawler</summary>
+                    <div class="advanced-settings-fields">
+                        <div class="field"><label for="max_pages">Максимум страниц</label><input id="max_pages" name="max_pages" type="number" min="1" max="200" step="1" value="{{ form.max_pages }}" required{% if errors.max_pages %} aria-invalid="true"{% endif %}>{% if errors.max_pages %}<p class="field-error">{{ errors.max_pages }}</p>{% endif %}</div>
+                        <div class="field"><label for="max_depth">Максимальная глубина</label><input id="max_depth" name="max_depth" type="number" min="0" max="10" step="1" value="{{ form.max_depth }}" required{% if errors.max_depth %} aria-invalid="true"{% endif %}>{% if errors.max_depth %}<p class="field-error">{{ errors.max_depth }}</p>{% endif %}</div>
+                        <div class="field"><label for="delay">Задержка между запросами, с</label><input id="delay" name="delay" type="text" inputmode="decimal" value="{{ form.delay }}" required{% if errors.delay %} aria-invalid="true"{% endif %}>{% if errors.delay %}<p class="field-error">{{ errors.delay }}</p>{% endif %}</div>
+                        <div class="field"><label for="timeout">Ожидание ответа, с</label><input id="timeout" name="timeout" type="text" inputmode="decimal" value="{{ form.timeout }}" required{% if errors.timeout %} aria-invalid="true"{% endif %}>{% if errors.timeout %}<p class="field-error">{{ errors.timeout }}</p>{% endif %}</div>
+                        <div class="field"><label for="user_agent">User-Agent</label><input id="user_agent" name="user_agent" type="text" maxlength="200" value="{{ form.user_agent }}" required{% if errors.user_agent %} aria-invalid="true"{% endif %}>{% if errors.user_agent %}<p class="field-error">{{ errors.user_agent }}</p>{% endif %}</div>
+                    </div>
+                </details>
+                <button class="primary-action" type="submit">Сохранить расписание</button>
+            </form>
+        </section>
+
+        <section class="content-card" aria-labelledby="smtp-title">
+            <div class="section-heading"><div><h2 id="smtp-title">Почтовые уведомления</h2><p>{{ smtp_state }}</p></div></div>
+            <p class="field-help">Настройка читается только из переменных окружения. Пароль никогда не показывается и не сохраняется в базе.</p>
+            {% if smtp_enabled %}
+            <form action="/sites/{{ site.id }}/schedule/test-email" method="post">
+                <input type="hidden" name="action_token" value="{{ smtp_test_token }}">
+                <button class="secondary-action" type="submit">Отправить тестовое письмо</button>
+            </form>
+            {% endif %}
+        </section>
+
+        <section class="content-card" aria-labelledby="history-title">
+            <div class="section-heading"><div><h2 id="history-title">Журнал запусков</h2><p>Новые записи показаны первыми.</p></div><span class="count">{{ history.total }}</span></div>
+            {% if history.entries %}
+            <div class="history-list">
+                {% for entry in history.entries %}
+                <article class="history-item">
+                    <div class="section-heading"><strong>{{ status_title(entry.status) }}</strong><time>{{ to_local_datetime(entry.scheduled_for) }}</time></div>
+                    <p>{{ entry.message }}</p>
+                    {% if entry.missed_periods %}<p class="event-meta">Пропущено периодов: {{ entry.missed_periods }}.</p>{% endif %}
+                    <p class="event-meta">Почтовое уведомление: {{ notification_status_title(entry.notification_status) }}.</p>
+                    <div class="form-actions">
+                        {% if entry.crawl_run_id %}<a class="secondary-action" href="/crawl-runs/{{ entry.crawl_run_id }}">Результат обхода</a>{% endif %}
+                        {% if entry.id in retry_tokens %}
+                        <form action="/sites/{{ site.id }}/schedule/{{ entry.id }}/retry" method="post">
+                            <input type="hidden" name="action_token" value="{{ retry_tokens[entry.id] }}">
+                            <button class="secondary-action" type="submit">Повторить</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}<div class="empty-state"><h3>Запусков пока нет</h3><p>Записи появятся после наступления расписания или ручного повтора.</p></div>{% endif %}
+            {% if history.page_count > 1 %}<nav class="pagination" aria-label="Страницы журнала">{% if history.page > 1 %}<a class="secondary-action" href="?page={{ history.page - 1 }}">Назад</a>{% else %}<span></span>{% endif %}<span>Страница {{ history.page }} из {{ history.page_count }}</span>{% if history.page < history.page_count %}<a class="secondary-action" href="?page={{ history.page + 1 }}">Далее</a>{% endif %}</nav>{% endif %}
+        </section>
+    </main>
+</body>
+</html>

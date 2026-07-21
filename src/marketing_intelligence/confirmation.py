@@ -8,6 +8,12 @@ import secrets
 DELETE_ACTION = "delete-site"
 CHECK_AVAILABILITY_ACTION = "check-availability"
 START_CRAWL_ACTION = "start-crawl"
+SAVE_SCHEDULE_ACTION = "save-schedule"
+TEST_SMTP_ACTION = "test-smtp"
+
+
+def retry_scheduled_crawl_action(entry_id: int) -> str:
+    return f"retry-scheduled-crawl:{entry_id}"
 
 
 def change_event_view_action(source: str, event_id: int, viewed: bool) -> str:
