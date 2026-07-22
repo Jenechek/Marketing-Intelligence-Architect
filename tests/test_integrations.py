@@ -1,4 +1,5 @@
-from datetime import UTC, datetime, timedelta
+import asyncio
+from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -10,10 +11,12 @@ from sqlmodel import Session, select
 from marketing_intelligence.config import Settings
 from marketing_intelligence.database import build_engine, initialize_database
 from marketing_intelligence.integrations import (GOOGLE, YANDEX, IntegrationError,
-    SecretBox, consume_attempt, matching_resources, start_oauth)
+    SecretBox, TokenLocks, consume_attempt, enqueue_sync, execute_pending,
+    finish_oauth, matching_resources, safe_json, select_resource, start_oauth)
 from marketing_intelligence.main import create_app
 from marketing_intelligence.models import (IntegrationOAuthAttempt,
-    IntegrationConnection, Site, SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED)
+    IntegrationConnection, IntegrationPageMetric, IntegrationSource,
+    IntegrationSyncRun, Site, SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED)
 
 
 def settings(tmp_path:Path,monkeypatch,configured=True):
@@ -95,3 +98,117 @@ def test_connect_is_protected_post_and_secrets_never_render(tmp_path,monkeypatch
         page=client.get("/own-sites/1/integrations");assert "google-secret" not in page.text
         forbidden=client.post("/own-sites/1/integrations/google_search_console/connect",data={"action_token":"bad"},follow_redirects=False)
         assert forbidden.status_code==303
+
+
+def _connected(tmp_path,monkeypatch,provider=GOOGLE):
+    active=settings(tmp_path,monkeypatch);engine=build_engine(active.database_url);initialize_database(engine);box=SecretBox(active.data_dir)
+    with Session(engine) as session:
+        session.add(Site(id=1,name="Сайт",url="https://example.test",site_type=SITE_TYPE_OWNED));session.add(IntegrationConnection(id=1,site_id=1,provider=provider,status="connected",access_token_encrypted=box.encrypt("old-access"),refresh_token_encrypted=box.encrypt("old-refresh"),token_expires_at=datetime(2026,7,22,tzinfo=UTC),provider_user_id="42" if provider==YANDEX else None));session.commit()
+    source=select_resource(engine,1,{"id":"sc-domain:example.test" if provider==GOOGLE else "host-id","label":"example.test"})
+    return active,engine,box,source
+
+
+def test_google_real_pagination_limit_and_partial(tmp_path,monkeypatch):
+    import marketing_intelligence.integrations as module
+    active,engine,box,source=_connected(tmp_path,monkeypatch);monkeypatch.setattr(module,"GOOGLE_PAGE_SIZE",2);monkeypatch.setattr(module,"MAX_ROWS",4)
+    calls=[]
+    def handler(request):
+        if request.url.path.endswith("/token"):return httpx.Response(200,json={"access_token":"new-access","expires_in":3600})
+        body=__import__("json").loads(request.content);calls.append(body);offset=body["startRow"]
+        rows=[{"keys":["2026-07-19",f"https://example.test/{offset+i}"],"clicks":1.0,"impressions":2.0,"position":str(i+1)} for i in range(2)]
+        return httpx.Response(200,json={"rows":rows})
+    asyncio.run(execute_pending(engine,box,active,httpx.AsyncClient(transport=httpx.MockTransport(handler)),TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+    assert [(c["rowLimit"],c["startRow"]) for c in calls]==[(2,0),(2,2)]
+    with Session(engine) as session:
+        run=session.exec(select(IntegrationSyncRun).order_by(IntegrationSyncRun.id.desc())).first();assert run.status=="partial" and run.requested_start==date(2026,6,20) and run.requested_end==date(2026,7,20);assert len(session.exec(select(IntegrationPageMetric)).all())==4
+
+
+def test_yandex_official_statistics_count_pagination_and_aggregation(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch,YANDEX);requests=[]
+    def handler(request):
+        if request.url.path.endswith("/token"):return httpx.Response(200,json={"access_token":"new","refresh_token":"rotated","expires_in":3600})
+        body=__import__("json").loads(request.content);requests.append(body);offset=body["offset"]
+        url=f"https://example.test/{offset}"
+        item={"text_indicator":{"type":"URL","value":url},"popular_complementary_indicator":{"type":"QUERY","value":"q"},"statistics":[{"date":"2026-07-19","field":"CLICKS","value":1.0},{"date":"2026-07-19","field":"IMPRESSIONS","value":4.0},{"date":"2026-07-19","field":"POSITION","value":2.50},{"date":"2026-07-18","field":"IMPRESSIONS","value":0.0}]}
+        return httpx.Response(200,json={"count":2,"text_indicator_to_statistics":[item]})
+    client=httpx.AsyncClient(transport=httpx.MockTransport(handler));asyncio.run(execute_pending(engine,box,active,client,TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+    assert [r["offset"] for r in requests]==[0,1] and all(r["limit"]==500 for r in requests)
+    assert all(r["device_type_indicator"]=="ALL" and r["search_location"]=="WEB_LOCATION" and r["text_indicator"]=="URL" for r in requests)
+    with Session(engine) as session:
+        rows=session.exec(select(IntegrationPageMetric).order_by(IntegrationPageMetric.normalized_url,IntegrationPageMetric.metric_date)).all();assert len(rows)==4;assert rows[0].impressions==0 and rows[0].clicks is None;connection=session.get(IntegrationConnection,1);assert box.decrypt(connection.refresh_token_encrypted)=="rotated"
+
+
+def test_401_refreshes_once_preserves_google_refresh_and_retries_once(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch);calls={"api":0,"refresh":0}
+    with Session(engine) as session:c=session.get(IntegrationConnection,1);c.token_expires_at=datetime(2027,1,1,tzinfo=UTC);session.add(c);session.commit()
+    def handler(request):
+        if request.url.path.endswith("/token"):calls["refresh"]+=1;return httpx.Response(200,json={"access_token":"fresh","expires_in":3600})
+        calls["api"]+=1
+        if calls["api"]==1:return httpx.Response(401,json={"error":"unauthorized"})
+        return httpx.Response(200,json={"rows":[]})
+    asyncio.run(execute_pending(engine,box,active,httpx.AsyncClient(transport=httpx.MockTransport(handler)),TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+    assert calls=={"api":2,"refresh":1}
+    with Session(engine) as session:c=session.get(IntegrationConnection,1);assert box.decrypt(c.refresh_token_encrypted)=="old-refresh";assert session.exec(select(IntegrationSyncRun).order_by(IntegrationSyncRun.id.desc())).first().status=="completed"
+
+
+def test_invalid_grant_requires_reauthorization_and_keeps_metrics(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:session.add(IntegrationPageMetric(source_id=source.id,provider=GOOGLE,metric_date=date(2026,7,1),normalized_url="https://example.test/old",clicks=1,impressions=2));session.commit()
+    def handler(request):return httpx.Response(400,json={"error":"invalid_grant"})
+    asyncio.run(execute_pending(engine,box,active,httpx.AsyncClient(transport=httpx.MockTransport(handler)),TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+    with Session(engine) as session:assert session.get(IntegrationConnection,1).status=="reauthorization_required";assert len(session.exec(select(IntegrationPageMetric)).all())==1
+
+
+def test_resource_change_is_idempotent_and_rejects_stale_form(tmp_path,monkeypatch):
+    active,engine,box,first=_connected(tmp_path,monkeypatch)
+    second=select_resource(engine,1,{"id":"https://example.test/","label":"prefix"},expected_source_id=first.id)
+    same=select_resource(engine,1,{"id":"https://example.test/","label":"prefix"},expected_source_id=second.id);assert same.id==second.id
+    try:select_resource(engine,1,{"id":"sc-domain:example.test","label":"domain"},expected_source_id=first.id)
+    except IntegrationError as exc:assert exc.code=="stale_resource"
+    else:assert False
+    with Session(engine) as session:assert len(session.exec(select(IntegrationSource)).all())==2;assert len([x for x in session.exec(select(IntegrationSource)).all() if x.active])==1
+
+
+def test_new_oauth_account_deactivates_old_source_without_deleting_history(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:session.add(IntegrationPageMetric(source_id=source.id,provider=GOOGLE,metric_date=date(2026,7,1),normalized_url="https://example.test/old",clicks=1,impressions=2));session.commit()
+    auth=start_oauth(engine,box,1,GOOGLE,active.google_oauth,another=True);state=parse_qs(urlsplit(auth).query)["state"][0]
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:httpx.Response(200,json={"access_token":"other-access","refresh_token":"other-refresh","expires_in":3600}))) as client:return await finish_oauth(engine,box,active,GOOGLE,state,"code",client)
+    assert asyncio.run(run())==1
+    with Session(engine) as session:
+        assert not session.exec(select(IntegrationSource).where(IntegrationSource.active==True)).all();assert len(session.exec(select(IntegrationPageMetric)).all())==1;assert box.decrypt(session.get(IntegrationConnection,1).access_token_encrypted)=="other-access"
+
+
+def test_untrusted_http_responses_are_bounded_and_sanitized():
+    cases=[httpx.Response(429,json={"error":"quota","secret":"do-not-show"}),httpx.Response(503,json={"error":"down"}),httpx.Response(200,content=b"not-json",headers={"content-type":"application/json"}),httpx.Response(200,content=b"x"*(2*1024*1024+1),headers={"content-type":"application/json"})]
+    async def run(response):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:response)) as client:
+            try:await safe_json(client,"GET","https://fixed.example/api")
+            except IntegrationError as exc:return str(exc),exc.code
+        assert False
+    results=[asyncio.run(run(response)) for response in cases]
+    assert [code for _,code in results]==["retryable","retryable","invalid_json","invalid_response"]
+    assert all("do-not-show" not in message for message,_ in results)
+
+
+def test_second_page_error_rolls_back_complete_dataset(tmp_path,monkeypatch):
+    import marketing_intelligence.integrations as module
+    active,engine,box,source=_connected(tmp_path,monkeypatch);monkeypatch.setattr(module,"GOOGLE_PAGE_SIZE",1)
+    with Session(engine) as session:session.add(IntegrationPageMetric(source_id=source.id,provider=GOOGLE,metric_date=date(2026,7,1),normalized_url="https://example.test/old",clicks=1,impressions=2));session.commit()
+    calls=0
+    def handler(request):
+        nonlocal calls
+        if request.url.path.endswith("/token"):return httpx.Response(200,json={"access_token":"fresh","expires_in":3600})
+        calls+=1
+        return httpx.Response(200,json={"rows":[{"keys":["2026-07-19","https://example.test/new" if calls==1 else "https://outside.test/bad"],"clicks":1,"impressions":2,"position":1}]})
+    asyncio.run(execute_pending(engine,box,active,httpx.AsyncClient(transport=httpx.MockTransport(handler)),TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+    with Session(engine) as session:
+        rows=session.exec(select(IntegrationPageMetric)).all();assert len(rows)==1 and rows[0].normalized_url.endswith("/old");assert session.exec(select(IntegrationSyncRun).order_by(IntegrationSyncRun.id.desc())).first().status=="failed"
+
+
+def test_background_job_rechecks_owned_type(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:site=session.get(Site,1);site.site_type=SITE_TYPE_COMPETITOR;session.add(site);session.commit()
+    asyncio.run(execute_pending(engine,box,active,httpx.AsyncClient(transport=httpx.MockTransport(lambda request:httpx.Response(500,json={}))),TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+    with Session(engine) as session:run=session.exec(select(IntegrationSyncRun).order_by(IntegrationSyncRun.id.desc())).first();assert run.status=="cancelled" and not session.exec(select(IntegrationPageMetric)).all()

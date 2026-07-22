@@ -11,6 +11,7 @@ from typing import Callable
 from urllib.parse import parse_qs
 
 import httpx
+from sqlalchemy import func
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -92,10 +93,10 @@ from .crawler import CrawlSettings, Crawler
 from .crawl_dispatcher import CrawlQueueDispatcher
 from .logging_config import configure_logging
 from .models import Site, SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED
-from .models import IntegrationConnection, IntegrationPageMetric, IntegrationSchedule, IntegrationSource, IntegrationSyncRun
+from .models import CrawlPageRecord, CrawlRun, IntegrationConnection, IntegrationPageMetric, IntegrationSchedule, IntegrationSource, IntegrationSyncRun
 from .integrations import (GOOGLE, YANDEX, PROVIDERS, IntegrationError, SecretBox,
-    automatic_resource, available_resources, consume_attempt, count_site_data as count_integration_data, disconnect, finish_oauth, provider_config,
-    execute_pending, recover_interrupted as recover_integration_runs, select_resource, snapshot as integration_snapshot, start_oauth)
+    TokenLocks, automatic_resource, available_resources, consume_attempt, count_site_data as count_integration_data, disconnect, enqueue_sync, finish_oauth, provider_config,
+    execute_pending, mark_connections_reauthorization, recover_interrupted as recover_integration_runs, select_resource, snapshot as integration_snapshot, start_oauth, validate_connection_secrets)
 from .scheduler import (
     FREQUENCY_TITLES,
     RETRYABLE,
@@ -113,6 +114,7 @@ from .scheduler import (
     save_schedule,
     schedule_to_form,
     status_title as scheduled_status_title,
+    calculate_next_run,
 )
 from .site_structure import (
     OUTCOME_TITLES,
@@ -229,10 +231,13 @@ def create_app(
         try:
             application.state.integration_box = SecretBox(active_settings.data_dir, active_settings.integration_key)
             application.state.integration_key_error = None
+            validate_connection_secrets(engine,application.state.integration_box)
         except IntegrationError as exc:
             application.state.integration_box = None
             application.state.integration_key_error = str(exc)
+            mark_connections_reauthorization(engine,"Ключ интеграций недоступен. Подключите аккаунт повторно.")
         application.state.integration_transport = integration_transport
+        application.state.integration_token_locks = TokenLocks()
         application.state.logger = logger
         application.state.action_token_secret = secrets.token_bytes(32)
         application.state.gsc_previews = PreviewStore(now_provider=clock)
@@ -256,7 +261,7 @@ def create_app(
             await application.state.crawl_dispatcher.wake(now=clock())
             if application.state.integration_box is not None:
                 async with integration_client_for_state(application) as client:
-                    await execute_pending(engine,application.state.integration_box,active_settings,client)
+                    await execute_pending(engine,application.state.integration_box,active_settings,client,application.state.integration_token_locks,now=clock())
 
         scheduler.add_job(
             scheduler_tick,
@@ -381,7 +386,7 @@ def create_app(
         try:
             async with integration_client(request) as client:
                 connection_id=await finish_oauth(request.app.state.engine,box,request.app.state.settings,provider,state,code,client)
-                resources=await available_resources(request.app.state.engine,box,connection_id,client,persist_user=True)
+                resources=await available_resources(request.app.state.engine,box,connection_id,client,persist_user=True,settings=request.app.state.settings,token_locks=request.app.state.integration_token_locks)
             with Session(request.app.state.engine) as session:
                 connection=session.get(IntegrationConnection,connection_id); site_for_choice=session.get(Site,connection.site_id); site_id=connection.site_id
             chosen=automatic_resource(site_for_choice.url,provider,resources)
@@ -416,9 +421,10 @@ def create_app(
         if not validate_action_token(request.app.state.action_token_secret,site_id,action,form.get("action_token",[""])[0]):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=forbidden",status_code=303)
         state=integration_snapshot(request.app.state.engine,site_id)[provider]; connection=state["connection"]
         try:
-            async with integration_client(request) as client: resources=await available_resources(request.app.state.engine,request.app.state.integration_box,connection.id,client)
-            chosen=next(r for r in resources if r["id"]==rid); select_resource(request.app.state.engine,connection.id,chosen)
-        except (IntegrationError,StopIteration):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=resource-error",status_code=303)
+            expected_id=int(source_id) or None
+            async with integration_client(request) as client: resources=await available_resources(request.app.state.engine,request.app.state.integration_box,connection.id,client,settings=request.app.state.settings,token_locks=request.app.state.integration_token_locks)
+            chosen=next(r for r in resources if r["id"]==rid); select_resource(request.app.state.engine,connection.id,chosen,expected_source_id=expected_id)
+        except (IntegrationError,StopIteration,ValueError):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=resource-error",status_code=303)
         return RedirectResponse(f"/own-sites/{site_id}/integrations?result=resource-changed",status_code=303)
 
     @application.post("/own-sites/{site_id}/integrations/{provider}/sync")
@@ -427,9 +433,8 @@ def create_app(
         if provider not in PROVIDERS or integration_site(request,site_id) is None or not validate_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:sync",form.get("action_token",[""])[0]):return RedirectResponse("/own-sites",status_code=303)
         state=integration_snapshot(request.app.state.engine,site_id)[provider]
         if state["connection"] and state["source"]:
-            with Session(request.app.state.engine) as session:
-                active=session.exec(select(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==state["connection"].id,IntegrationSyncRun.status.in_(("pending","running")))).first()
-                if active is None:session.add(IntegrationSyncRun(connection_id=state["connection"].id,source_id=state["source"].id,trigger="manual"));session.commit()
+            try:enqueue_sync(request.app.state.engine,state["connection"].id,state["source"].id,"manual")
+            except IntegrationError:pass
         return RedirectResponse(f"/own-sites/{site_id}/integrations",status_code=303)
 
     @application.post("/own-sites/{site_id}/integrations/{provider}/disconnect")
@@ -458,16 +463,25 @@ def create_app(
             sources=list(session.exec(select(IntegrationSource).where(IntegrationSource.connection_id==connection.id).order_by(IntegrationSource.version.desc())).all()) if connection else []
             requested=request.query_params.get("source_id")
             source=next((s for s in sources if str(s.id)==requested),None) or next((s for s in sources if s.active),None)
-            statement=select(IntegrationPageMetric).where(IntegrationPageMetric.source_id==source.id) if source else None
             date_from=request.query_params.get("date_from","");date_to=request.query_params.get("date_to","")
-            if statement is not None:
+            total=0; crawler_urls=None
+            if source is not None:
                 try:
-                    if date_from:statement=statement.where(IntegrationPageMetric.metric_date>=date.fromisoformat(date_from))
-                    if date_to:statement=statement.where(IntegrationPageMetric.metric_date<=date.fromisoformat(date_to))
-                except ValueError:date_from=date_to=""
-                items=list(session.exec(statement.order_by(IntegrationPageMetric.metric_date.desc(),IntegrationPageMetric.normalized_url).offset((page-1)*50).limit(50)).all())
+                    parsed_from=date.fromisoformat(date_from) if date_from else None;parsed_to=date.fromisoformat(date_to) if date_to else None
+                    if parsed_from and parsed_to and parsed_from>parsed_to:raise ValueError
+                except ValueError:date_from=date_to="";parsed_from=parsed_to=None
+                conditions=[IntegrationPageMetric.source_id==source.id]
+                if parsed_from:conditions.append(IntegrationPageMetric.metric_date>=parsed_from)
+                if parsed_to:conditions.append(IntegrationPageMetric.metric_date<=parsed_to)
+                statement=select(IntegrationPageMetric).where(*conditions)
+                total=session.exec(select(func.count()).select_from(IntegrationPageMetric).where(*conditions)).one()
+                metrics=list(session.exec(statement.order_by(IntegrationPageMetric.metric_date.desc(),IntegrationPageMetric.normalized_url).offset((page-1)*50).limit(50)).all())
+                crawl=session.exec(select(CrawlRun).where(CrawlRun.site_id==site_id,CrawlRun.status.in_(("completed","partial")),CrawlRun.completed_at!=None).order_by(CrawlRun.completed_at.desc(),CrawlRun.id.desc())).first()
+                if crawl:
+                    crawler_urls=set(session.exec(select(CrawlPageRecord.url).where(CrawlPageRecord.crawl_run_id==crawl.id)).all())
+                items=[{"metric":metric,"crawler_status":"Подходящего обхода пока нет" if crawler_urls is None else "Есть в последнем обходе" if metric.normalized_url in crawler_urls else "Не найдена в последнем обходе"} for metric in metrics]
             else:items=[]
-        return templates.TemplateResponse(request=request,name="integration_metrics.html",context={"site":site,"provider":provider,"sources":sources,"source":source,"items":items,"page":page,"date_from":date_from,"date_to":date_to,"google":GOOGLE,"yandex":YANDEX})
+        return templates.TemplateResponse(request=request,name="integration_metrics.html",context={"site":site,"provider":provider,"sources":sources,"source":source,"items":items,"page":page,"total_pages":max(1,(total+49)//50),"date_from":date_from,"date_to":date_to,"google":GOOGLE,"yandex":YANDEX})
 
     @application.get("/own-sites/{site_id}/integrations/{provider}/schedule",response_class=HTMLResponse)
     async def integration_schedule_page(request:Request,site_id:int,provider:str) -> HTMLResponse:
@@ -485,9 +499,8 @@ def create_app(
         try:
             weekday=int(form.get("local_weekday",["0"])[0]);hour,minute=map(int,local_time.split(":"));assert frequency in {"daily","weekly"} and 0<=weekday<=6 and 0<=hour<24 and 0<=minute<60
         except (ValueError,AssertionError):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=schedule-error",status_code=303)
-        state=integration_snapshot(request.app.state.engine,site_id)[provider];now=datetime.now(UTC);candidate=now.replace(hour=hour,minute=minute,second=0,microsecond=0)
-        if candidate<=now:candidate+=timedelta(days=1)
-        if frequency=="weekly":candidate+=timedelta(days=(weekday-candidate.weekday())%7)
+        state=integration_snapshot(request.app.state.engine,site_id)[provider];now=clock();candidate=calculate_next_run(frequency=frequency,local_weekday=weekday,local_time=local_time,now=now,local_timezone=active_settings.local_timezone)
+        if not state["connection"] or state["connection"].status!="connected":return RedirectResponse(f"/own-sites/{site_id}/integrations?result=schedule-error",status_code=303)
         with Session(request.app.state.engine) as session:
             schedule=session.exec(select(IntegrationSchedule).where(IntegrationSchedule.connection_id==state["connection"].id)).one_or_none() or IntegrationSchedule(connection_id=state["connection"].id)
             schedule.enabled=enabled;schedule.frequency=frequency;schedule.local_weekday=weekday;schedule.local_time=local_time;schedule.next_run_at=candidate if enabled else None;session.add(schedule);session.commit()

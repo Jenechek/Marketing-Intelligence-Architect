@@ -298,7 +298,7 @@ class IntegrationConnection(SQLModel, table=True):
 
 
 class IntegrationSource(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("connection_id", "version", name="uq_integration_source_version"),)
+    __table_args__ = (UniqueConstraint("connection_id", "version", name="uq_integration_source_version"), CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_source_provider"), CheckConstraint("version >= 1", name="ck_integration_source_version"))
     id: int | None = Field(default=None, primary_key=True)
     connection_id: int = Field(foreign_key="integrationconnection.id", index=True)
     provider: str = Field(index=True)
@@ -310,7 +310,7 @@ class IntegrationSource(SQLModel, table=True):
 
 
 class IntegrationOAuthAttempt(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("state_hash", name="uq_integration_oauth_state"),)
+    __table_args__ = (UniqueConstraint("state_hash", name="uq_integration_oauth_state"), CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_oauth_provider"), CheckConstraint("action IN ('connect','another')", name="ck_integration_oauth_action"))
     id: int | None = Field(default=None, primary_key=True)
     site_id: int = Field(foreign_key="site.id", index=True)
     provider: str = Field(index=True)
@@ -334,7 +334,7 @@ class IntegrationSchedule(SQLModel, table=True):
 
 
 class IntegrationSyncRun(SQLModel, table=True):
-    __table_args__ = (CheckConstraint("status IN ('pending','running','completed','partial','failed','interrupted','cancelled')", name="ck_integration_sync_status"),)
+    __table_args__ = (CheckConstraint("status IN ('pending','running','completed','partial','failed','interrupted','cancelled')", name="ck_integration_sync_status"), CheckConstraint("trigger IN ('initial','manual','scheduled')", name="ck_integration_sync_trigger"), CheckConstraint("requested_start IS NULL OR requested_end IS NULL OR requested_start <= requested_end", name="ck_integration_sync_requested_period"), CheckConstraint("actual_start IS NULL OR actual_end IS NULL OR actual_start <= actual_end", name="ck_integration_sync_actual_period"), CheckConstraint("added_count >= 0 AND updated_count >= 0 AND unchanged_count >= 0 AND rejected_count >= 0", name="ck_integration_sync_counts"))
     id: int | None = Field(default=None, primary_key=True)
     connection_id: int = Field(foreign_key="integrationconnection.id", index=True)
     source_id: int | None = Field(default=None, foreign_key="integrationsource.id", index=True)
@@ -356,7 +356,7 @@ class IntegrationSyncRun(SQLModel, table=True):
 
 
 class IntegrationPageMetric(SQLModel, table=True):
-    __table_args__ = (UniqueConstraint("source_id", "metric_date", "normalized_url", name="uq_integration_metric_source_date_url"), CheckConstraint("clicks IS NULL OR clicks >= 0", name="ck_integration_metric_clicks"), CheckConstraint("impressions IS NULL OR impressions >= 0", name="ck_integration_metric_impressions"))
+    __table_args__ = (UniqueConstraint("source_id", "metric_date", "normalized_url", name="uq_integration_metric_source_date_url"), CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_metric_provider"), CheckConstraint("clicks IS NULL OR clicks >= 0", name="ck_integration_metric_clicks"), CheckConstraint("impressions IS NULL OR impressions >= 0", name="ck_integration_metric_impressions"), CheckConstraint("clicks IS NULL OR impressions IS NULL OR clicks <= impressions", name="ck_integration_metric_clicks_impressions"), CheckConstraint("position_text IS NULL OR position_text <> ''", name="ck_integration_metric_position"))
     id: int | None = Field(default=None, primary_key=True)
     source_id: int = Field(foreign_key="integrationsource.id", index=True)
     provider: str = Field(index=True)
