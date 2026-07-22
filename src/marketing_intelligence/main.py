@@ -96,7 +96,7 @@ from .models import Site, SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED
 from .models import CrawlPageRecord, CrawlRun, IntegrationConnection, IntegrationPageMetric, IntegrationSchedule, IntegrationSource, IntegrationSyncRun
 from .integrations import (GOOGLE, YANDEX, PROVIDERS, IntegrationError, SecretBox,
     TokenLocks, automatic_resource, available_resources, consume_attempt, count_site_data as count_integration_data, disconnect, enqueue_sync, finish_oauth, provider_config,
-    execute_pending, mark_connections_reauthorization, recover_interrupted as recover_integration_runs, select_resource, snapshot as integration_snapshot, start_oauth, validate_connection_secrets)
+    execute_pending, mark_connections_reauthorization, recover_interrupted as recover_integration_runs, refresh_connection, save_integration_schedule, select_resource, snapshot as integration_snapshot, start_oauth, validate_connection_secrets)
 from .scheduler import (
     FREQUENCY_TITLES,
     RETRYABLE,
@@ -359,7 +359,10 @@ def create_app(
         if site is None: return HTMLResponse("Собственный сайт не найден.",status_code=404)
         states=integration_snapshot(request.app.state.engine,site_id)
         configs={p:provider_config(request.app.state.settings,p) for p in PROVIDERS}
-        tokens={p:{a:create_action_token(request.app.state.action_token_secret,site_id,f"integration:{p}:{a}") for a in ("connect","another","sync","disconnect","schedule")} for p in PROVIDERS}
+        tokens={}
+        for p in PROVIDERS:
+            revision=states[p]["connection"].revision if states[p]["connection"] else 0
+            tokens[p]={a:create_action_token(request.app.state.action_token_secret,site_id,f"integration:{p}:{a}:{revision}" if a=="sync" else f"integration:{p}:{a}") for a in ("connect","another","sync","disconnect","schedule")}
         return templates.TemplateResponse(request=request,name="integrations.html",context={"site":site,"states":states,"configs":configs,"tokens":tokens,"google":GOOGLE,"yandex":YANDEX,"key_error":request.app.state.integration_key_error,"result":request.query_params.get("result")})
 
     @application.post("/own-sites/{site_id}/integrations/{provider}/connect")
@@ -409,38 +412,61 @@ def create_app(
         try:
             async with integration_client(request) as client: resources=await available_resources(request.app.state.engine,request.app.state.integration_box,connection.id,client)
             error=None
-        except IntegrationError as exc:resources=[];error=str(exc)
-        action=f"integration:{provider}:resource:{state['source'].id if state['source'] else 0}"
-        return templates.TemplateResponse(request=request,name="integration_resources.html",context={"site_id":site_id,"provider":provider,"resources":resources,"error":error,"action_token":create_action_token(request.app.state.action_token_secret,site_id,action),"source_id":state["source"].id if state["source"] else 0})
+        except IntegrationError as exc:resources=[];error=str(exc);error_code=exc.code
+        else:error_code=None
+        source_id=state["source"].id if state["source"] else 0;revision=connection.revision
+        action=f"integration:{provider}:resource:{source_id}:{revision}"
+        refresh_action=f"integration:{provider}:resource-refresh:{revision}"
+        return templates.TemplateResponse(request=request,name="integration_resources.html",context={"site_id":site_id,"provider":provider,"resources":resources,"error":error,"error_code":error_code,"action_token":create_action_token(request.app.state.action_token_secret,site_id,action),"refresh_token":create_action_token(request.app.state.action_token_secret,site_id,refresh_action),"source_id":source_id,"connection_revision":revision})
+
+    @application.post("/own-sites/{site_id}/integrations/{provider}/resources/refresh")
+    async def integration_resource_refresh(request:Request,site_id:int,provider:str) -> RedirectResponse:
+        if provider not in PROVIDERS or integration_site(request,site_id) is None:return RedirectResponse("/own-sites",status_code=303)
+        form=parse_qs((await request.body()).decode("utf-8",errors="replace"));raw_revision=form.get("connection_revision",[""])[0]
+        try:revision=int(raw_revision)
+        except ValueError:return RedirectResponse(f"/own-sites/{site_id}/integrations?result=forbidden",status_code=303)
+        action=f"integration:{provider}:resource-refresh:{revision}"
+        if not validate_action_token(request.app.state.action_token_secret,site_id,action,form.get("action_token",[""])[0]):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=forbidden",status_code=303)
+        state=integration_snapshot(request.app.state.engine,site_id)[provider];connection=state["connection"]
+        try:
+            if not connection or connection.revision != revision:raise IntegrationError("Подключение изменилось.","connection_changed")
+            async with integration_client(request) as client:await refresh_connection(request.app.state.engine,request.app.state.integration_box,request.app.state.settings,connection.id,client,request.app.state.integration_token_locks,force=True,expected_revision=revision,now=clock())
+        except IntegrationError:return RedirectResponse(f"/own-sites/{site_id}/integrations?result=resource-error",status_code=303)
+        return RedirectResponse(f"/own-sites/{site_id}/integrations/{provider}/resources",status_code=303)
 
     @application.post("/own-sites/{site_id}/integrations/{provider}/resources")
     async def integration_resource_save(request:Request,site_id:int,provider:str) -> RedirectResponse:
         if provider not in PROVIDERS or integration_site(request,site_id) is None:return RedirectResponse("/own-sites",status_code=303)
-        form=parse_qs((await request.body()).decode("utf-8",errors="replace")); rid=form.get("resource_id",[""])[0]; source_id=form.get("source_id",["0"])[0]
-        action=f"integration:{provider}:resource:{source_id}"
+        form=parse_qs((await request.body()).decode("utf-8",errors="replace")); rid=form.get("resource_id",[""])[0]; source_id=form.get("source_id",["0"])[0];raw_revision=form.get("connection_revision",[""])[0]
+        action=f"integration:{provider}:resource:{source_id}:{raw_revision}"
         if not validate_action_token(request.app.state.action_token_secret,site_id,action,form.get("action_token",[""])[0]):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=forbidden",status_code=303)
         state=integration_snapshot(request.app.state.engine,site_id)[provider]; connection=state["connection"]
         try:
-            expected_id=int(source_id) or None
+            expected_id=int(source_id) or None;expected_revision=int(raw_revision)
             async with integration_client(request) as client: resources=await available_resources(request.app.state.engine,request.app.state.integration_box,connection.id,client,settings=request.app.state.settings,token_locks=request.app.state.integration_token_locks)
-            chosen=next(r for r in resources if r["id"]==rid); select_resource(request.app.state.engine,connection.id,chosen,expected_source_id=expected_id)
+            chosen=next(r for r in resources if r["id"]==rid); select_resource(request.app.state.engine,connection.id,chosen,expected_source_id=expected_id,expected_revision=expected_revision)
         except (IntegrationError,StopIteration,ValueError):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=resource-error",status_code=303)
         return RedirectResponse(f"/own-sites/{site_id}/integrations?result=resource-changed",status_code=303)
 
     @application.post("/own-sites/{site_id}/integrations/{provider}/sync")
     async def integration_sync_now(request:Request,site_id:int,provider:str) -> RedirectResponse:
         form=parse_qs((await request.body()).decode("utf-8",errors="replace"))
-        if provider not in PROVIDERS or integration_site(request,site_id) is None or not validate_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:sync",form.get("action_token",[""])[0]):return RedirectResponse("/own-sites",status_code=303)
+        if provider not in PROVIDERS or integration_site(request,site_id) is None:return RedirectResponse("/own-sites",status_code=303)
         state=integration_snapshot(request.app.state.engine,site_id)[provider]
+        revision=state["connection"].revision if state["connection"] else 0
+        if not validate_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:sync:{revision}",form.get("action_token",[""])[0]):return RedirectResponse("/own-sites",status_code=303)
         if state["connection"] and state["source"]:
-            try:enqueue_sync(request.app.state.engine,state["connection"].id,state["source"].id,"manual")
+            try:enqueue_sync(request.app.state.engine,state["connection"].id,state["source"].id,"manual",expected_revision=revision)
             except IntegrationError:pass
         return RedirectResponse(f"/own-sites/{site_id}/integrations",status_code=303)
 
     @application.post("/own-sites/{site_id}/integrations/{provider}/disconnect")
     async def integration_disconnect(request:Request,site_id:int,provider:str) -> RedirectResponse:
         form=parse_qs((await request.body()).decode("utf-8",errors="replace"))
-        if provider in PROVIDERS and integration_site(request,site_id) and validate_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:disconnect",form.get("action_token",[""])[0]):disconnect(request.app.state.engine,site_id,provider)
+        raw_revision=form.get("connection_revision",[""])[0]
+        try:revision=int(raw_revision)
+        except ValueError:revision=0
+        if provider in PROVIDERS and integration_site(request,site_id) and validate_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:disconnect:{revision}",form.get("action_token",[""])[0]):disconnect(request.app.state.engine,site_id,provider,expected_revision=revision)
         return RedirectResponse(f"/own-sites/{site_id}/integrations",status_code=303)
 
     @application.get("/own-sites/{site_id}/integrations/{provider}/disconnect",response_class=HTMLResponse)
@@ -448,7 +474,8 @@ def create_app(
         if provider not in PROVIDERS or integration_site(request,site_id) is None:return HTMLResponse("Собственный сайт не найден.",status_code=404)
         state=integration_snapshot(request.app.state.engine,site_id)[provider]
         if not state["connection"]:return RedirectResponse(f"/own-sites/{site_id}/integrations",status_code=303)
-        return templates.TemplateResponse(request=request,name="integration_disconnect.html",context={"site_id":site_id,"provider":provider,"action_token":create_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:disconnect")})
+        revision=state["connection"].revision
+        return templates.TemplateResponse(request=request,name="integration_disconnect.html",context={"site_id":site_id,"provider":provider,"connection_revision":revision,"action_token":create_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:disconnect:{revision}")})
 
     @application.get("/own-sites/{site_id}/integrations/metrics",response_class=HTMLResponse)
     async def integration_metrics(request:Request,site_id:int) -> HTMLResponse:
@@ -489,21 +516,24 @@ def create_app(
         item=integration_snapshot(request.app.state.engine,site_id)[provider]
         if not item["connection"]:return RedirectResponse(f"/own-sites/{site_id}/integrations",status_code=303)
         schedule=item["schedule"] or IntegrationSchedule(connection_id=item["connection"].id)
-        return templates.TemplateResponse(request=request,name="integration_schedule.html",context={"site_id":site_id,"provider":provider,"schedule":schedule,"action_token":create_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:schedule"),"error":None})
+        revision=item["connection"].revision
+        return templates.TemplateResponse(request=request,name="integration_schedule.html",context={"site_id":site_id,"provider":provider,"schedule":schedule,"connection_revision":revision,"action_token":create_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:schedule:{revision}"),"error":None})
 
     @application.post("/own-sites/{site_id}/integrations/{provider}/schedule",response_class=HTMLResponse)
     async def integration_schedule_save(request:Request,site_id:int,provider:str) -> RedirectResponse:
         form=parse_qs((await request.body()).decode("utf-8",errors="replace"),keep_blank_values=True)
-        if provider not in PROVIDERS or integration_site(request,site_id) is None or not validate_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:schedule",form.get("action_token",[""])[0]):return RedirectResponse("/own-sites",status_code=303)
+        raw_revision=form.get("connection_revision",[""])[0]
+        try:revision=int(raw_revision)
+        except ValueError:return RedirectResponse("/own-sites",status_code=303)
+        if provider not in PROVIDERS or integration_site(request,site_id) is None or not validate_action_token(request.app.state.action_token_secret,site_id,f"integration:{provider}:schedule:{revision}",form.get("action_token",[""])[0]):return RedirectResponse("/own-sites",status_code=303)
         enabled=form.get("enabled",[""])[0]=="1";frequency=form.get("frequency",["weekly"])[0];local_time=form.get("local_time",["09:00"])[0]
         try:
             weekday=int(form.get("local_weekday",["0"])[0]);hour,minute=map(int,local_time.split(":"));assert frequency in {"daily","weekly"} and 0<=weekday<=6 and 0<=hour<24 and 0<=minute<60
         except (ValueError,AssertionError):return RedirectResponse(f"/own-sites/{site_id}/integrations?result=schedule-error",status_code=303)
         state=integration_snapshot(request.app.state.engine,site_id)[provider];now=clock();candidate=calculate_next_run(frequency=frequency,local_weekday=weekday,local_time=local_time,now=now,local_timezone=active_settings.local_timezone)
-        if not state["connection"] or state["connection"].status!="connected":return RedirectResponse(f"/own-sites/{site_id}/integrations?result=schedule-error",status_code=303)
-        with Session(request.app.state.engine) as session:
-            schedule=session.exec(select(IntegrationSchedule).where(IntegrationSchedule.connection_id==state["connection"].id)).one_or_none() or IntegrationSchedule(connection_id=state["connection"].id)
-            schedule.enabled=enabled;schedule.frequency=frequency;schedule.local_weekday=weekday;schedule.local_time=local_time;schedule.next_run_at=candidate if enabled else None;session.add(schedule);session.commit()
+        if not state["connection"]:return RedirectResponse(f"/own-sites/{site_id}/integrations?result=schedule-error",status_code=303)
+        try:save_integration_schedule(request.app.state.engine,state["connection"].id,expected_revision=revision,enabled=enabled,frequency=frequency,local_weekday=weekday,local_time=local_time,next_run_at=candidate)
+        except IntegrationError:return RedirectResponse(f"/own-sites/{site_id}/integrations?result=schedule-error",status_code=303)
         return RedirectResponse(f"/own-sites/{site_id}/integrations?result=schedule-saved",status_code=303)
 
     async def create_site_in_section(

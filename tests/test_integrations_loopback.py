@@ -93,9 +93,9 @@ def test_actual_uvicorn_tcp_oauth_sync_and_persistent_restart(tmp_path:Path,monk
                 deadline=time.monotonic()+8
                 while time.monotonic()<deadline:
                     with Session(app.state.engine) as session:
-                        active=session.exec(select(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==1,IntegrationSyncRun.status.in_(("pending","running")))).all()
-                        done=session.exec(select(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==1,IntegrationSyncRun.status=="completed")).all()
-                        if not active and len(done)>=3:break
+                            active_runs=session.exec(select(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==1,IntegrationSyncRun.status.in_(("pending","running")))).all()
+                            done=session.exec(select(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==1,IntegrationSyncRun.status=="completed")).all()
+                            if not active_runs and len(done)>=3:break
                     time.sleep(.2)
 
                 # Плановый запуск использует сохранённое правило и один catch-up.
@@ -131,19 +131,28 @@ def test_actual_uvicorn_tcp_oauth_sync_and_persistent_restart(tmp_path:Path,monk
                     assert client.get(url).status_code==200
                 assert sha256(db.read_bytes()).hexdigest()==before_gets
 
-                # Отключение сохраняет показатели; перенос блокируется; удаление очищает всё.
+                # Отключение сохраняет показатели, перенос остаётся заблокированным.
                 disconnect_page=client.get("/own-sites/1/integrations/google_search_console/disconnect");disconnect_form=_form(disconnect_page.text,"/own-sites/1/integrations/google_search_console/disconnect") if False else {i.get("name"):i.get("value","") for i in BeautifulSoup(disconnect_page.text,"html.parser").find("form").find_all("input")}
                 with Session(app.state.engine) as session:before_metrics=len(session.exec(select(IntegrationPageMetric)).all())
                 client.post("/own-sites/1/integrations/google_search_console/disconnect",data=disconnect_form)
                 with Session(app.state.engine) as session:assert len(session.exec(select(IntegrationPageMetric)).all())==before_metrics
                 transfer=client.get("/sites/1/transfer");transfer_form={i.get("name"):i.get("value","") for i in BeautifulSoup(transfer.text,"html.parser").find("form").find_all("input")};assert client.post("/sites/1/transfer",data=transfer_form).status_code==409
-                delete_page=client.get("/sites/1/delete");delete_form={i.get("name"):i.get("value","") for i in BeautifulSoup(delete_page.text,"html.parser").find("form").find_all("input")};client.post("/sites/1/delete",data=delete_form)
-                with Session(app.state.engine) as session:assert session.get(IntegrationConnection,1) is None and not session.exec(select(IntegrationPageMetric)).all() and not session.exec(select(IntegrationSource)).all()
     finally:
         server.should_exit=True;thread.join(timeout=10)
-    app2=create_app(active,integration_transport=httpx.MockTransport(provider));server2=uvicorn.Server(uvicorn.Config(app2,host="127.0.0.1",port=_port(),log_level="error"));thread2=threading.Thread(target=server2.run,daemon=True);thread2.start();deadline=time.monotonic()+10
+    app2=create_app(active,integration_transport=httpx.MockTransport(provider));port2=_port();server2=uvicorn.Server(uvicorn.Config(app2,host="127.0.0.1",port=port2,log_level="error"));thread2=threading.Thread(target=server2.run,daemon=True);thread2.start();deadline=time.monotonic()+10
     while not server2.started and time.monotonic()<deadline:time.sleep(.02)
     assert server2.started
     try:
-        with Session(app2.state.engine) as session:assert not session.exec(select(IntegrationConnection)).all() and not session.exec(select(IntegrationPageMetric)).all()
+        with httpx.Client(base_url=f"http://127.0.0.1:{port2}",trust_env=False,follow_redirects=True) as client:
+            assert client.get("/own-sites/1/integrations").status_code==200
+            # Сначала фактически открываем ту же SQLite с тем же ключом и проверяем данные.
+            with Session(app2.state.engine) as session:
+                connections=session.exec(select(IntegrationConnection).order_by(IntegrationConnection.id)).all();sources=session.exec(select(IntegrationSource)).all();metrics=session.exec(select(IntegrationPageMetric)).all()
+                assert len(connections)==2 and sources and metrics
+                yandex=next(item for item in connections if item.provider=="yandex_webmaster")
+                assert app2.state.integration_box.decrypt(yandex.access_token_encrypted)
+                assert app2.state.integration_box.decrypt(yandex.refresh_token_encrypted)
+            # Удаление проверяется отдельно и только после успешной проверки перезапуска.
+            delete_page=client.get("/sites/1/delete");delete_form={i.get("name"):i.get("value","") for i in BeautifulSoup(delete_page.text,"html.parser").find("form").find_all("input")};client.post("/sites/1/delete",data=delete_form)
+        with Session(app2.state.engine) as session:assert not session.exec(select(IntegrationConnection)).all() and not session.exec(select(IntegrationPageMetric)).all() and not session.exec(select(IntegrationSource)).all()
     finally:server2.should_exit=True;thread2.join(timeout=10)

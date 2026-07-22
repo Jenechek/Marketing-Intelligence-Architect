@@ -21,6 +21,7 @@ def initialize_database(engine: Engine) -> None:
 
     if engine.dialect.name == "sqlite":
         _prepare_sqlite_site_type(engine)
+        _prepare_sqlite_integration_revision(engine)
     SQLModel.metadata.create_all(engine)
 
 
@@ -60,3 +61,21 @@ def _prepare_sqlite_site_type(engine: Engine) -> None:
                     + " OR ".join(owned_sources)
                 )
             )
+
+
+def _prepare_sqlite_integration_revision(engine: Engine) -> None:
+    """Добавить ревизию состояния в SQLite, созданную ранней версией TASK-0037."""
+
+    inspector = inspect(engine)
+    if "integrationconnection" not in set(inspector.get_table_names()):
+        return
+    columns = {column["name"] for column in inspector.get_columns("integrationconnection")}
+    if "revision" in columns:
+        return
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "ALTER TABLE integrationconnection ADD COLUMN revision INTEGER "
+                "NOT NULL DEFAULT 1 CHECK (revision >= 1)"
+            )
+        )

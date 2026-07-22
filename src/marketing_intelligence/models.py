@@ -284,11 +284,13 @@ class IntegrationConnection(SQLModel, table=True):
         UniqueConstraint("site_id", "provider", name="uq_integration_connection_site_provider"),
         CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_connection_provider"),
         CheckConstraint("status IN ('connecting','connected','reauthorization_required','error','disconnected')", name="ck_integration_connection_status"),
+        CheckConstraint("revision >= 1", name="ck_integration_connection_revision"),
     )
     id: int | None = Field(default=None, primary_key=True)
     site_id: int = Field(foreign_key="site.id", index=True)
     provider: str = Field(index=True)
     status: str = Field(default="connecting", index=True)
+    revision: int = Field(default=1, nullable=False)
     access_token_encrypted: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     refresh_token_encrypted: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
     token_expires_at: datetime | None = Field(default=None, sa_column=Column(UTCDateTime(), nullable=True))

@@ -5,18 +5,20 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
+from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
 from marketing_intelligence.config import Settings
 from marketing_intelligence.database import build_engine, initialize_database
 from marketing_intelligence.integrations import (GOOGLE, YANDEX, IntegrationError,
-    SecretBox, TokenLocks, consume_attempt, enqueue_sync, execute_pending,
+    SecretBox, TokenLocks, consume_attempt, disconnect, enqueue_sync, execute_pending,
     finish_oauth, matching_resources, safe_json, select_resource, start_oauth)
 from marketing_intelligence.main import create_app
 from marketing_intelligence.models import (IntegrationOAuthAttempt,
-    IntegrationConnection, IntegrationPageMetric, IntegrationSource,
+    IntegrationConnection, IntegrationPageMetric, IntegrationSchedule, IntegrationSource,
     IntegrationSyncRun, Site, SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED)
+from marketing_intelligence.sites import delete_site
 
 
 def settings(tmp_path:Path,monkeypatch,configured=True):
@@ -88,6 +90,53 @@ def test_integration_screen_is_owned_only_read_only_and_no_credentials(tmp_path,
         before=sha256((tmp_path/"app.db").read_bytes()).hexdigest();response=client.get("/own-sites/1/integrations");after=sha256((tmp_path/"app.db").read_bytes()).hexdigest()
         assert response.status_code==200 and "Google Search Console" in response.text and "Яндекс Вебмастер" in response.text and "Не настроено" in response.text
         assert before==after and client.get("/own-sites/2/integrations").status_code==404
+
+
+def test_expired_resource_get_is_read_only_and_offers_protected_refresh(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);requests=[]
+    def provider(request):
+        requests.append(request)
+        return httpx.Response(500,json={"error":"must-not-be-called"})
+    app=create_app(active,integration_transport=httpx.MockTransport(provider))
+    with TestClient(app) as client:
+        client.post("/own-sites",data={"name":"Свой","url":"https://example.test"})
+        box=app.state.integration_box
+        with Session(app.state.engine) as session:
+            session.add(IntegrationConnection(id=1,site_id=1,provider=GOOGLE,status="connected",access_token_encrypted=box.encrypt("expired"),refresh_token_encrypted=box.encrypt("refresh"),token_expires_at=datetime.now(UTC)-timedelta(seconds=1)))
+            session.commit()
+        before=sha256((tmp_path/"app.db").read_bytes()).hexdigest()
+        response=client.get("/own-sites/1/integrations/google_search_console/resources")
+        after=sha256((tmp_path/"app.db").read_bytes()).hexdigest()
+        assert response.status_code==200 and before==after and requests==[]
+        form=BeautifulSoup(response.text,"html.parser").find("form",attrs={"action":"/own-sites/1/integrations/google_search_console/resources/refresh"})
+        assert form is not None and form.find("input",attrs={"name":"action_token"})
+
+
+def test_protected_resource_refresh_rotates_tokens_then_opens_current_list(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);calls=[]
+    def provider(request):
+        calls.append(request.url.path)
+        if request.url.path.endswith("/token"):
+            return httpx.Response(200,json={"access_token":"fresh","refresh_token":"rotated","expires_in":3600})
+        return httpx.Response(200,json={"siteEntry":[{"siteUrl":"sc-domain:example.test","permissionLevel":"siteOwner"}]})
+    app=create_app(active,integration_transport=httpx.MockTransport(provider))
+    with TestClient(app) as client:
+        client.post("/own-sites",data={"name":"Свой","url":"https://example.test"})
+        box=app.state.integration_box
+        with Session(app.state.engine) as session:
+            session.add(IntegrationConnection(id=1,site_id=1,provider=GOOGLE,status="connected",access_token_encrypted=box.encrypt("expired"),refresh_token_encrypted=box.encrypt("refresh"),token_expires_at=datetime.now(UTC)-timedelta(seconds=1)))
+            session.commit()
+        page=client.get("/own-sites/1/integrations/google_search_console/resources")
+        form=BeautifulSoup(page.text,"html.parser").find("form",attrs={"action":"/own-sites/1/integrations/google_search_console/resources/refresh"})
+        payload={item["name"]:item.get("value","") for item in form.find_all("input") if item.get("name")}
+        response=client.post(form["action"],data=payload)
+        assert response.status_code==200 and "sc-domain:example.test" in response.text
+        with Session(app.state.engine) as session:
+            connection=session.get(IntegrationConnection,1)
+            assert box.decrypt(connection.access_token_encrypted)=="fresh"
+            assert box.decrypt(connection.refresh_token_encrypted)=="rotated"
+            assert not session.exec(select(IntegrationSource)).all()
+            assert not session.exec(select(IntegrationSyncRun)).all()
 
 
 def test_connect_is_protected_post_and_secrets_never_render(tmp_path,monkeypatch):
@@ -212,3 +261,142 @@ def test_background_job_rechecks_owned_type(tmp_path,monkeypatch):
     with Session(engine) as session:site=session.get(Site,1);site.site_type=SITE_TYPE_COMPETITOR;session.add(site);session.commit()
     asyncio.run(execute_pending(engine,box,active,httpx.AsyncClient(transport=httpx.MockTransport(lambda request:httpx.Response(500,json={}))),TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
     with Session(engine) as session:run=session.exec(select(IntegrationSyncRun).order_by(IntegrationSyncRun.id.desc())).first();assert run.status=="cancelled" and not session.exec(select(IntegrationPageMetric)).all()
+
+
+def test_late_401_after_disconnect_keeps_disconnected_and_finishes_run(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:
+        connection=session.get(IntegrationConnection,1);connection.token_expires_at=datetime(2027,1,1,tzinfo=UTC);session.add(connection);session.commit()
+
+    async def scenario():
+        started=asyncio.Event();release=asyncio.Event()
+        async def handler(request):
+            if request.url.path.endswith("/searchAnalytics/query"):
+                started.set();await release.wait();return httpx.Response(401,json={"error":"unauthorized"})
+            return httpx.Response(400,json={"error":"invalid_grant"})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            task=asyncio.create_task(execute_pending(engine,box,active,client,TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+            await started.wait();disconnect(engine,1,GOOGLE);release.set();await task
+    asyncio.run(scenario())
+
+    with Session(engine) as session:
+        connection=session.get(IntegrationConnection,1);run=session.exec(select(IntegrationSyncRun).order_by(IntegrationSyncRun.id.desc())).first()
+        assert connection.status=="disconnected"
+        assert connection.access_token_encrypted is None and connection.refresh_token_encrypted is None
+        assert run.status in {"interrupted","cancelled"} and run.completed_at is not None
+
+
+def test_site_delete_during_external_request_is_controlled_and_next_tick_runs(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:
+        connection=session.get(IntegrationConnection,1);connection.token_expires_at=datetime(2027,1,1,tzinfo=UTC);session.add(connection);session.commit()
+
+    async def scenario():
+        started=asyncio.Event();release=asyncio.Event()
+        async def handler(request):
+            started.set();await release.wait();return httpx.Response(200,json={"rows":[]})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            task=asyncio.create_task(execute_pending(engine,box,active,client,TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+            await started.wait();assert delete_site(engine,1);release.set();assert await task is True
+            assert await execute_pending(engine,box,active,client,TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)) is False
+    asyncio.run(scenario())
+    with Session(engine) as session:
+        assert session.get(Site,1) is None
+        assert not session.exec(select(IntegrationConnection)).all()
+        assert not session.exec(select(IntegrationSource)).all()
+        assert not session.exec(select(IntegrationPageMetric)).all()
+        assert not session.exec(select(IntegrationSyncRun)).all()
+
+
+def test_new_oauth_account_interrupts_old_running_sync_without_mixing(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:
+        connection=session.get(IntegrationConnection,1);connection.token_expires_at=datetime(2027,1,1,tzinfo=UTC);session.add(connection);session.commit()
+
+    async def scenario():
+        started=asyncio.Event();release=asyncio.Event()
+        async def old_api(request):
+            started.set();await release.wait();return httpx.Response(200,json={"rows":[{"keys":["2026-07-19","https://example.test/old-account"],"clicks":1,"impressions":2,"position":1}]})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(old_api)) as client:
+            task=asyncio.create_task(execute_pending(engine,box,active,client,TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+            await started.wait()
+            auth=start_oauth(engine,box,1,GOOGLE,active.google_oauth,another=True);state=parse_qs(urlsplit(auth).query)["state"][0]
+            async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:httpx.Response(200,json={"access_token":"new-account","refresh_token":"new-refresh","expires_in":3600}))) as oauth_client:
+                await finish_oauth(engine,box,active,GOOGLE,state,"code",oauth_client)
+            release.set();await task
+    asyncio.run(scenario())
+    with Session(engine) as session:
+        connection=session.get(IntegrationConnection,1);run=session.exec(select(IntegrationSyncRun).order_by(IntegrationSyncRun.id.desc())).first()
+        assert connection.status=="connected" and box.decrypt(connection.access_token_encrypted)=="new-account"
+        assert run.status=="interrupted" and not session.exec(select(IntegrationPageMetric)).all()
+        assert not session.exec(select(IntegrationSource).where(IntegrationSource.active==True)).all()
+
+
+def test_site_delete_during_token_refresh_does_not_restore_connection(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    started=asyncio.Event();release=asyncio.Event()
+    async def handler(request):
+        if request.url.path.endswith("/token"):
+            started.set();await release.wait();return httpx.Response(200,json={"access_token":"late","refresh_token":"late-refresh","expires_in":3600})
+        return httpx.Response(200,json={"rows":[]})
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            task=asyncio.create_task(execute_pending(engine,box,active,client,TokenLocks(),now=datetime(2026,7,22,tzinfo=UTC)))
+            await started.wait();assert delete_site(engine,1);release.set();assert await task is True
+    asyncio.run(scenario())
+    with Session(engine) as session:assert not session.exec(select(IntegrationConnection)).all() and not session.exec(select(IntegrationSyncRun)).all()
+
+
+def test_stale_schedule_form_cannot_reenable_after_disconnect(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch);app=create_app(active)
+    with TestClient(app) as client:
+        page=client.get("/own-sites/1/integrations/google_search_console/schedule")
+        form=BeautifulSoup(page.text,"html.parser").find("form")
+        payload={item["name"]:item.get("value","") for item in form.find_all("input") if item.get("name")}
+        payload.update(enabled="1",frequency="daily",local_weekday="0",local_time="09:00")
+        disconnect(app.state.engine,1,GOOGLE)
+        client.post("/own-sites/1/integrations/google_search_console/schedule",data=payload)
+        with Session(app.state.engine) as session:
+            schedule=session.exec(select(IntegrationSchedule).where(IntegrationSchedule.connection_id==1)).one()
+            assert schedule.enabled is False and schedule.next_run_at is None
+
+
+def test_stale_resource_form_cannot_create_source_after_disconnect(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);app=create_app(active,integration_transport=httpx.MockTransport(lambda request:httpx.Response(200,json={"siteEntry":[{"siteUrl":"sc-domain:example.test","permissionLevel":"siteOwner"}]})))
+    with TestClient(app) as client:
+        client.post("/own-sites",data={"name":"Свой","url":"https://example.test"})
+        box=app.state.integration_box
+        with Session(app.state.engine) as session:
+            session.add(IntegrationConnection(id=1,site_id=1,provider=GOOGLE,status="connected",access_token_encrypted=box.encrypt("access"),refresh_token_encrypted=box.encrypt("refresh"),token_expires_at=datetime(2027,1,1,tzinfo=UTC)))
+            session.commit()
+        page=client.get("/own-sites/1/integrations/google_search_console/resources")
+        form=BeautifulSoup(page.text,"html.parser").find("form")
+        payload={item["name"]:item.get("value","") for item in form.find_all("input") if item.get("name")};payload["resource_id"]="sc-domain:example.test"
+        disconnect(app.state.engine,1,GOOGLE)
+        client.post("/own-sites/1/integrations/google_search_console/resources",data=payload)
+        with Session(app.state.engine) as session:assert not session.exec(select(IntegrationSource)).all()
+
+
+def test_restart_same_database_and_key_preserves_and_decrypts_integration(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:
+        session.add(IntegrationPageMetric(source_id=source.id,provider=GOOGLE,metric_date=date(2026,7,19),normalized_url="https://example.test/page",clicks=2,impressions=5));session.commit()
+    engine.dispose()
+    restarted_engine=build_engine(active.database_url);initialize_database(restarted_engine);restarted_box=SecretBox(active.data_dir)
+    with Session(restarted_engine) as session:
+        connection=session.get(IntegrationConnection,1)
+        assert restarted_box.decrypt(connection.access_token_encrypted)=="old-access"
+        assert restarted_box.decrypt(connection.refresh_token_encrypted)=="old-refresh"
+        assert session.get(IntegrationSource,source.id).resource_id==source.resource_id
+        assert session.exec(select(IntegrationPageMetric)).one().clicks==2
+
+
+def test_delete_after_restart_preservation_removes_integration_separately(tmp_path,monkeypatch):
+    active,engine,box,source=_connected(tmp_path,monkeypatch)
+    with Session(engine) as session:
+        session.add(IntegrationPageMetric(source_id=source.id,provider=GOOGLE,metric_date=date(2026,7,19),normalized_url="https://example.test/page",clicks=2,impressions=5));session.commit()
+    engine.dispose();restarted_engine=build_engine(active.database_url);initialize_database(restarted_engine)
+    with Session(restarted_engine) as session:assert session.exec(select(IntegrationPageMetric)).one().clicks==2
+    assert delete_site(restarted_engine,1)
+    with Session(restarted_engine) as session:
+        assert not session.exec(select(IntegrationConnection)).all() and not session.exec(select(IntegrationPageMetric)).all()

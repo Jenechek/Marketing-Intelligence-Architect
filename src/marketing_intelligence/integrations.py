@@ -162,8 +162,14 @@ async def finish_oauth(engine: Engine, box: SecretBox, settings, provider: str, 
     expires=token.get("expires_in",3600)
     if not isinstance(expires,(int,float)) or expires<=0: expires=3600
     with Session(engine) as session:
+        if engine.dialect.name == "sqlite":
+            session.exec(text("BEGIN IMMEDIATE"))
+        site=session.get(Site,attempt.site_id)
+        if not site or site.site_type != SITE_TYPE_OWNED:
+            raise IntegrationError("Собственный сайт удалён во время подключения.", "connection_changed")
         connection=session.exec(select(IntegrationConnection).where(IntegrationConnection.site_id==attempt.site_id,IntegrationConnection.provider==provider)).one_or_none()
         if connection is None: connection=IntegrationConnection(site_id=attempt.site_id,provider=provider)
+        else: connection.revision += 1
         connection.status="connected"; connection.access_token_encrypted=box.encrypt(access); connection.refresh_token_encrypted=box.encrypt(refresh)
         connection.token_expires_at=datetime.now(UTC)+timedelta(seconds=min(int(expires),86400)); connection.last_error=None; connection.updated_at=datetime.now(UTC)
         connection.provider_user_id=None
@@ -221,12 +227,16 @@ def automatic_resource(site_url:str,provider:str,resources:list[dict]) -> dict |
     return best[0] if len(best)==1 else None
 
 
-def select_resource(engine: Engine, connection_id: int, resource: dict, *, expected_source_id: int | None = None) -> IntegrationSource:
+def select_resource(engine: Engine, connection_id: int, resource: dict, *, expected_source_id: int | None = None, expected_revision: int | None = None) -> IntegrationSource:
     with Session(engine) as session:
         if engine.dialect.name == "sqlite":
             session.exec(text("BEGIN IMMEDIATE"))
         connection=session.get(IntegrationConnection,connection_id)
-        if not connection: raise IntegrationError("Подключение не найдено.","not_found")
+        site=session.get(Site,connection.site_id) if connection else None
+        if not connection or connection.status != "connected" or not site or site.site_type != SITE_TYPE_OWNED:
+            raise IntegrationError("Подключение недоступно.","connection_changed")
+        if expected_revision is not None and connection.revision != expected_revision:
+            raise IntegrationError("Подключение изменилось в другом окне. Обновите страницу.","connection_changed")
         current=session.exec(select(IntegrationSource).where(IntegrationSource.connection_id==connection_id,IntegrationSource.active==True)).one_or_none()
         current_id=current.id if current else None
         if current_id != expected_source_id:
@@ -239,13 +249,14 @@ def select_resource(engine: Engine, connection_id: int, resource: dict, *, expec
         session.exec(update(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==connection_id,IntegrationSyncRun.status=="pending").values(status="cancelled",completed_at=datetime.now(UTC),message="Запуск отменён после смены ресурса."))
         version=(session.exec(select(func.max(IntegrationSource.version)).where(IntegrationSource.connection_id==connection_id)).one() or 0)+1
         source=IntegrationSource(connection_id=connection_id,provider=connection.provider,version=version,resource_id=resource["id"],resource_label=resource["label"])
+        connection.revision += 1; connection.updated_at=datetime.now(UTC); session.add(connection)
         session.add(source); session.flush()
         if session.exec(select(IntegrationSchedule).where(IntegrationSchedule.connection_id==connection_id)).one_or_none() is None:
             session.add(IntegrationSchedule(connection_id=connection_id))
         session.add(IntegrationSyncRun(connection_id=connection_id,source_id=source.id,trigger="initial")); session.commit(); session.refresh(source); return source
 
 
-def enqueue_sync(engine: Engine, connection_id: int, source_id: int, trigger: str) -> IntegrationSyncRun:
+def enqueue_sync(engine: Engine, connection_id: int, source_id: int, trigger: str, *, expected_revision: int | None = None) -> IntegrationSyncRun:
     """Идемпотентно поставить один запуск подключения в сохраняемую очередь."""
 
     with Session(engine) as session:
@@ -254,7 +265,7 @@ def enqueue_sync(engine: Engine, connection_id: int, source_id: int, trigger: st
         connection = session.get(IntegrationConnection, connection_id)
         source = session.get(IntegrationSource, source_id)
         site = session.get(Site, connection.site_id) if connection else None
-        if not connection or connection.status != "connected" or not source or not source.active or source.connection_id != connection_id or not site or site.site_type != SITE_TYPE_OWNED:
+        if not connection or connection.status != "connected" or (expected_revision is not None and connection.revision != expected_revision) or not source or not source.active or source.connection_id != connection_id or not site or site.site_type != SITE_TYPE_OWNED:
             raise IntegrationError("Подключение или активный ресурс недоступны.", "connection_changed")
         active = session.exec(select(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==connection_id,IntegrationSyncRun.status.in_(("pending","running"))).order_by(IntegrationSyncRun.id)).first()
         if active:
@@ -272,10 +283,15 @@ async def available_resources(engine: Engine, box: SecretBox, connection_id: int
                               settings=None, token_locks: TokenLocks | None = None) -> list[dict]:
     with Session(engine) as session:
         connection=session.get(IntegrationConnection,connection_id)
-        if not connection or not connection.access_token_encrypted: raise IntegrationError("Подключение не найдено.","not_found")
+        if not connection or connection.status != "connected" or not connection.access_token_encrypted: raise IntegrationError("Подключение не найдено.","not_found")
         site=session.get(Site,connection.site_id)
+        if not site or site.site_type != SITE_TYPE_OWNED: raise IntegrationError("Собственный сайт не найден.","not_found")
+        site_url=site.url
+        if settings is None and connection.token_expires_at and connection.token_expires_at <= datetime.now(UTC):
+            raise IntegrationError("Срок доступа истёк. Безопасно обновите доступ, чтобы продолжить.","token_refresh_required")
         token=box.decrypt(connection.access_token_encrypted)
         provider=connection.provider
+        revision=connection.revision
     async def call(method,url,**kwargs):
         if settings is not None:
             return await authenticated_json(engine,box,settings,connection_id,client,token_locks or TokenLocks(),method,url,now=datetime.now(UTC),**kwargs)
@@ -291,10 +307,15 @@ async def available_resources(engine: Engine, box: SecretBox, connection_id: int
         raw=data.get("hosts",[])
         if persist_user:
             with Session(engine) as session:
+                if engine.dialect.name == "sqlite":
+                    session.exec(text("BEGIN IMMEDIATE"))
                 connection=session.get(IntegrationConnection,connection_id)
-                if connection: connection.provider_user_id=str(uid); session.add(connection); session.commit()
+                site=session.get(Site,connection.site_id) if connection else None
+                if not connection or connection.status != "connected" or connection.revision != revision or not site or site.site_type != SITE_TYPE_OWNED:
+                    raise IntegrationError("Подключение изменилось во время получения ресурсов.","connection_changed")
+                connection.provider_user_id=str(uid); session.add(connection); session.commit()
     if not isinstance(raw,list) or len(raw)>MAX_ROWS: raise IntegrationError("Список ресурсов имеет недопустимый размер.","invalid_response")
-    return matching_resources(site.url,provider,[x for x in raw if isinstance(x,dict)])
+    return matching_resources(site_url,provider,[x for x in raw if isinstance(x,dict)])
 
 
 def snapshot(engine: Engine, site_id: int) -> dict[str, dict]:
@@ -314,14 +335,38 @@ def snapshot(engine: Engine, site_id: int) -> dict[str, dict]:
         return result
 
 
-def disconnect(engine: Engine, site_id: int, provider: str) -> bool:
+def disconnect(engine: Engine, site_id: int, provider: str, *, expected_revision: int | None = None) -> bool:
     with Session(engine) as session:
+        if engine.dialect.name == "sqlite":
+            session.exec(text("BEGIN IMMEDIATE"))
         connection=session.exec(select(IntegrationConnection).where(IntegrationConnection.site_id==site_id,IntegrationConnection.provider==provider)).one_or_none()
         if not connection:return False
+        site=session.get(Site,site_id)
+        if not site or site.site_type != SITE_TYPE_OWNED:return False
+        if expected_revision is not None and connection.revision != expected_revision:return False
         connection.access_token_encrypted=None; connection.refresh_token_encrypted=None; connection.token_expires_at=None; connection.status="disconnected"; connection.last_error=None
+        connection.revision += 1; connection.updated_at=datetime.now(UTC)
         session.exec(update(IntegrationSchedule).where(IntegrationSchedule.connection_id==connection.id).values(enabled=False,next_run_at=None))
-        session.exec(update(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==connection.id,IntegrationSyncRun.status=="pending").values(status="cancelled",message="Запуск отменён после отключения."))
+        session.exec(update(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==connection.id,IntegrationSyncRun.status=="pending").values(status="cancelled",completed_at=datetime.now(UTC),message="Запуск отменён после отключения."))
         session.add(connection); session.commit(); return True
+
+
+def save_integration_schedule(engine: Engine, connection_id: int, *, expected_revision: int,
+                              enabled: bool, frequency: str, local_weekday: int,
+                              local_time: str, next_run_at: datetime | None) -> IntegrationSchedule:
+    """Сохранить расписание только для неизменившегося активного подключения."""
+
+    with Session(engine) as session:
+        if engine.dialect.name == "sqlite":
+            session.exec(text("BEGIN IMMEDIATE"))
+        connection=session.get(IntegrationConnection,connection_id)
+        site=session.get(Site,connection.site_id) if connection else None
+        source=session.exec(select(IntegrationSource).where(IntegrationSource.connection_id==connection_id,IntegrationSource.active==True)).one_or_none() if connection else None
+        if not connection or connection.status != "connected" or connection.revision != expected_revision or not site or site.site_type != SITE_TYPE_OWNED or not source:
+            raise IntegrationError("Подключение изменилось. Обновите страницу.","connection_changed")
+        schedule=session.exec(select(IntegrationSchedule).where(IntegrationSchedule.connection_id==connection_id)).one_or_none() or IntegrationSchedule(connection_id=connection_id)
+        schedule.enabled=enabled;schedule.frequency=frequency;schedule.local_weekday=local_weekday;schedule.local_time=local_time;schedule.next_run_at=next_run_at if enabled else None
+        session.add(schedule);session.commit();session.refresh(schedule);return schedule
 
 
 def count_site_data(session: Session, site_id: int) -> int:
@@ -350,6 +395,7 @@ async def refresh_connection(
     *,
     force: bool = False,
     previous_access: str | None = None,
+    expected_revision: int | None = None,
     now: datetime | None = None,
 ) -> str:
     """Обновить пару токенов один раз и сохранить её атомарно."""
@@ -360,7 +406,9 @@ async def refresh_connection(
         with Session(engine) as session:
             connection = session.get(IntegrationConnection, connection_id)
             if not connection or connection.status != "connected":
-                raise IntegrationError("Требуется повторное подключение.", "invalid_grant")
+                raise IntegrationError("Подключение изменилось.", "connection_changed")
+            if expected_revision is not None and connection.revision != expected_revision:
+                raise IntegrationError("Подключение изменилось.", "connection_changed")
             if not connection.access_token_encrypted or not connection.refresh_token_encrypted:
                 raise IntegrationError("Требуется повторное подключение.", "invalid_grant")
             current_access = box.decrypt(connection.access_token_encrypted)
@@ -370,6 +418,7 @@ async def refresh_connection(
                 return current_access
             provider = connection.provider
             refresh = box.decrypt(connection.refresh_token_encrypted)
+            revision = connection.revision
         config = provider_config(settings, provider)
         url = "https://oauth2.googleapis.com/token" if provider == GOOGLE else "https://oauth.yandex.com/token"
         try:
@@ -383,10 +432,14 @@ async def refresh_connection(
         except IntegrationError as exc:
             if exc.code == "invalid_grant":
                 with Session(engine) as session:
+                    if engine.dialect.name == "sqlite":
+                        session.exec(text("BEGIN IMMEDIATE"))
                     connection = session.get(IntegrationConnection, connection_id)
-                    if connection:
+                    if connection and connection.status == "connected" and connection.revision == revision:
                         connection.status = "reauthorization_required"
                         connection.last_error = str(exc)
+                        connection.revision += 1
+                        connection.updated_at = moment
                         session.add(connection)
                         session.commit()
             raise
@@ -398,8 +451,11 @@ async def refresh_connection(
         if isinstance(expires, bool) or not isinstance(expires, (int, float)) or expires <= 0:
             raise IntegrationError("Провайдер вернул неверный срок токена.", "invalid_response")
         with Session(engine) as session:
+            if engine.dialect.name == "sqlite":
+                session.exec(text("BEGIN IMMEDIATE"))
             connection = session.get(IntegrationConnection, connection_id)
-            if not connection or connection.status != "connected":
+            site = session.get(Site, connection.site_id) if connection else None
+            if not connection or connection.status != "connected" or connection.revision != revision or not site or site.site_type != SITE_TYPE_OWNED:
                 raise IntegrationError("Подключение изменилось во время обновления токена.", "connection_changed")
             connection.access_token_encrypted = box.encrypt(access)
             connection.refresh_token_encrypted = box.encrypt(rotated)
@@ -504,19 +560,46 @@ def _parse_yandex_page(data: dict, site_url: str) -> tuple[int, list[tuple[date,
     return count, parsed
 
 
+def _finish_run_error(engine: Engine, run_id: int, error: IntegrationError,
+                      moment: datetime, expected_revision: int) -> None:
+    """Завершить существующий журнал, не воскрешая удалённое состояние."""
+
+    with Session(engine) as session:
+        if engine.dialect.name == "sqlite":
+            session.exec(text("BEGIN IMMEDIATE"))
+        run=session.get(IntegrationSyncRun,run_id)
+        if run is None:
+            session.rollback();return
+        connection=session.get(IntegrationConnection,run.connection_id)
+        if connection is None:
+            session.rollback();return
+        changed=connection.status != "connected" or connection.revision != expected_revision
+        run.status="interrupted" if changed else "failed"
+        run.completed_at=moment;run.error_code=error.code;run.message=(
+            "Синхронизация остановлена: подключение изменилось во время внешнего запроса."
+            if changed else str(error)
+        )
+        if not changed and error.code in {"invalid_grant","decrypt_failed"}:
+            connection.status="reauthorization_required";connection.last_error=str(error);connection.revision += 1;connection.updated_at=moment;session.add(connection)
+        session.add(run);session.commit()
+
+
 async def execute_pending(
     engine:Engine, box:SecretBox, settings, client:httpx.AsyncClient,
     token_locks: TokenLocks | None = None, *, now: datetime | None = None,
 ) -> bool:
     """Выполнить один сохранённый запуск; все строки фиксируются одной транзакцией."""
     with Session(engine) as session:
+        if engine.dialect.name == "sqlite":
+            session.exec(text("BEGIN IMMEDIATE"))
         moment=now or datetime.now(UTC)
         due=list(session.exec(select(IntegrationSchedule).where(IntegrationSchedule.enabled==True,IntegrationSchedule.next_run_at!=None,IntegrationSchedule.next_run_at<=moment)).all())
         for schedule in due:
             connection=session.get(IntegrationConnection,schedule.connection_id)
             source=session.exec(select(IntegrationSource).where(IntegrationSource.connection_id==schedule.connection_id,IntegrationSource.active==True)).one_or_none()
             active=session.exec(select(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==schedule.connection_id,IntegrationSyncRun.status.in_(("pending","running")))).first()
-            if connection and source and active is None:session.add(IntegrationSyncRun(connection_id=connection.id,source_id=source.id,trigger="scheduled"))
+            site=session.get(Site,connection.site_id) if connection else None
+            if connection and connection.status=="connected" and source and source.active and site and site.site_type==SITE_TYPE_OWNED and active is None:session.add(IntegrationSyncRun(connection_id=connection.id,source_id=source.id,trigger="scheduled"))
             next_run=schedule.next_run_at
             while next_run and next_run<=moment:
                 next_run=advance_run(next_run,frequency=schedule.frequency,local_timezone=settings.local_timezone)
@@ -532,7 +615,7 @@ async def execute_pending(
         if competing:return False
         end=(moment-timedelta(days=2)).date(); start=end-timedelta(days=13 if connection.provider==YANDEX else 30)
         run.status="running";run.started_at=moment;run.requested_start=start;run.requested_end=end;session.add(run);session.commit(); run_id=run.id
-        provider=connection.provider; resource=source.resource_id; source_id=source.id; user_id=connection.provider_user_id; site_url=site.url; connection_id=connection.id
+        provider=connection.provider; resource=source.resource_id; source_id=source.id; user_id=connection.provider_user_id; site_url=site.url; connection_id=connection.id; connection_revision=connection.revision
     try:
         locks=token_locks or TokenLocks(); rows=[]; partial=False
         if provider==GOOGLE:
@@ -570,9 +653,13 @@ async def execute_pending(
         with Session(engine) as session:
             if engine.dialect.name == "sqlite":
                 session.exec(text("BEGIN IMMEDIATE"))
-            run=session.get(IntegrationSyncRun,run_id); connection=session.get(IntegrationConnection,run.connection_id)
+            run=session.get(IntegrationSyncRun,run_id)
+            if run is None:
+                session.rollback();return True
+            connection=session.get(IntegrationConnection,run.connection_id)
             current=session.get(IntegrationSource,source_id)
-            if not current or not current.active or current.connection_id!=connection_id or connection.status!="connected":
+            site=session.get(Site,connection.site_id) if connection else None
+            if not connection or not current or not current.active or current.connection_id!=connection_id or connection.status!="connected" or connection.revision != connection_revision or not site or site.site_type != SITE_TYPE_OWNED:
                 raise IntegrationError("Ресурс или подключение изменились во время синхронизации.","connection_changed")
             existing={(m.metric_date,m.normalized_url):m for m in session.exec(select(IntegrationPageMetric).where(IntegrationPageMetric.source_id==source_id)).all()}; added=updated=unchanged=0
             for day,url,clicks,impressions,position in rows:
@@ -583,12 +670,11 @@ async def execute_pending(
                 session.add(metric)
             run.status="partial" if partial else "completed";run.completed_at=moment;run.actual_start=min((x[0] for x in rows),default=None);run.actual_end=max((x[0] for x in rows),default=None);run.added_count=added;run.updated_count=updated;run.unchanged_count=unchanged;run.message="Данные сохранены; источник может возвращать ограниченный набор строк.";session.add(run);session.commit()
     except IntegrationError as exc:
-        with Session(engine) as session:
-            run=session.get(IntegrationSyncRun,run_id); connection=session.get(IntegrationConnection,run.connection_id);run.status="failed";run.completed_at=moment;run.error_code=exc.code;run.message=str(exc)
-            if exc.code in {"invalid_grant","decrypt_failed"}:connection.status="reauthorization_required";connection.last_error=str(exc);session.add(connection)
-            session.add(run);session.commit()
+        _finish_run_error(engine,run_id,exc,moment,connection_revision)
     except SQLAlchemyError:
         with Session(engine) as session:
+            if engine.dialect.name == "sqlite":
+                session.exec(text("BEGIN IMMEDIATE"))
             run=session.get(IntegrationSyncRun,run_id)
             if run:
                 run.status="failed";run.completed_at=moment;run.error_code="storage_error";run.message="Не удалось безопасно сохранить проверенный набор данных.";session.add(run);session.commit()
@@ -612,10 +698,11 @@ def validate_connection_secrets(engine: Engine, box: SecretBox) -> None:
                 box.decrypt(connection.access_token_encrypted);box.decrypt(connection.refresh_token_encrypted)
             except IntegrationError:
                 connection.status="reauthorization_required";connection.last_error="Защищённые данные недоступны. Подключите аккаунт повторно.";session.add(connection);changed=True
+                connection.revision += 1;connection.updated_at=datetime.now(UTC)
         if changed:session.commit()
 
 
 def mark_connections_reauthorization(engine: Engine, message: str) -> None:
     with Session(engine) as session:
-        session.exec(update(IntegrationConnection).where(IntegrationConnection.status=="connected").values(status="reauthorization_required",last_error=message,updated_at=datetime.now(UTC)))
+        session.exec(update(IntegrationConnection).where(IntegrationConnection.status=="connected").values(status="reauthorization_required",last_error=message,updated_at=datetime.now(UTC),revision=IntegrationConnection.revision+1))
         session.commit()
