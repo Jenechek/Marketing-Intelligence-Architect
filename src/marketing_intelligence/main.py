@@ -3,7 +3,8 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
+from decimal import Decimal
 from pathlib import Path
 import secrets
 from typing import Callable
@@ -11,7 +12,7 @@ from urllib.parse import parse_qs
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -57,6 +58,19 @@ from .confirmation import (
 )
 from .config import Settings
 from .database import build_engine, initialize_database
+from .gsc_csv import (
+    FIELD_TITLES,
+    GSCImportError,
+    LOGICAL_FIELDS,
+    parse_mapping,
+    parse_pages_csv,
+    read_limited_async_upload,
+    validate_period,
+    validate_rows,
+)
+from .gsc_persistence import save_import
+from .gsc_preview import ImportPreview, PreviewStore
+from .gsc_query import count_import_data, list_imports, list_metrics, list_periods
 from .crawl_history import (
     ActiveCrawlRunError,
     RUNNING_STATUS,
@@ -122,6 +136,11 @@ from .smtp_notifications import MailTransport, SMTPNotifier
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
+UPLOAD_GSC_ACTION = "upload-gsc-pages"
+
+
+def confirm_gsc_action(preview_token: str) -> str:
+    return f"confirm-gsc-pages:{preview_token}"
 
 
 def create_app(
@@ -157,6 +176,7 @@ def create_app(
         application.state.engine = engine
         application.state.logger = logger
         application.state.action_token_secret = secrets.token_bytes(32)
+        application.state.gsc_previews = PreviewStore(now_provider=clock)
         application.state.availability_checker = availability_checker or AvailabilityChecker()
         application.state.crawler = crawler or Crawler()
         application.state.smtp_notifier = SMTPNotifier(
@@ -262,6 +282,237 @@ def create_app(
 
         add_site(request.app.state.engine, form["name"], form["url"])
         return RedirectResponse(url="/?created=1", status_code=303)
+
+    @application.get("/sites/{site_id}/imports", response_class=HTMLResponse)
+    async def gsc_import_screen(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        page, page_error = parse_positive_page(request.query_params.get("page", "1"))
+        return render_import_screen(
+            request,
+            site,
+            page=page,
+            action_error=page_error,
+            status_code=422 if page_error else 200,
+        )
+
+    @application.post("/sites/{site_id}/imports/preview", response_class=HTMLResponse)
+    async def gsc_import_preview(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        try:
+            raw = await request.form()
+        except Exception:
+            return render_import_screen(
+                request,
+                site,
+                action_error="Не удалось прочитать multipart-форму загрузки.",
+                status_code=422,
+            )
+        action_token = str(raw.get("action_token", ""))
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            UPLOAD_GSC_ACTION,
+            action_token,
+        ):
+            return render_import_error(
+                request,
+                site,
+                title="Загрузка не разрешена",
+                message="Защитный токен отсутствует или недействителен. Откройте экран импорта заново.",
+                status_code=403,
+            )
+        form = {
+            "period_start": str(raw.get("period_start", "")),
+            "period_end": str(raw.get("period_end", "")),
+            "report_confirmed": str(raw.get("report_confirmed", "")),
+        }
+        today = clock().astimezone(active_settings.local_timezone).date()
+        period_start, period_end, errors = validate_period(
+            form["period_start"], form["period_end"], today
+        )
+        if form["report_confirmed"] != "yes":
+            errors["report_confirmed"] = (
+                "Подтвердите, что это вкладка «Страницы» без дополнительных фильтров."
+            )
+        upload = raw.get("csv_file")
+        parsed = None
+        if not isinstance(upload, UploadFile) and not (
+            hasattr(upload, "read") and hasattr(upload, "filename")
+        ):
+            upload = None
+        if upload is None or not upload.filename:
+            errors["csv_file"] = "Выберите CSV-файл."
+        else:
+            try:
+                content = await read_limited_async_upload(upload)
+                parsed = parse_pages_csv(upload.filename, content)
+            except GSCImportError as error:
+                errors["csv_file"] = str(error)
+            finally:
+                await upload.close()
+        if errors or parsed is None or period_start is None or period_end is None:
+            return render_import_screen(
+                request, site, form=form, errors=errors, status_code=422
+            )
+        preview = request.app.state.gsc_previews.add(
+            site_id, period_start, period_end, parsed
+        )
+        return render_mapping_screen(request, site, preview)
+
+    @application.post("/sites/{site_id}/imports/confirm", response_class=HTMLResponse)
+    async def confirm_gsc_import(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        body = await read_small_form_body(request)
+        if body is None:
+            return render_import_error(
+                request,
+                site,
+                title="Подтверждение слишком велико",
+                message="Повторите загрузку и выберите столбцы заново.",
+                status_code=422,
+            )
+        raw = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        value = lambda name: raw.get(name, [""])[0]
+        preview_token = value("preview_token")
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            confirm_gsc_action(preview_token),
+            value("action_token"),
+        ):
+            return render_import_error(
+                request,
+                site,
+                title="Импорт не разрешён",
+                message="Защитный токен отсутствует или недействителен. Повторите загрузку файла.",
+                status_code=403,
+            )
+        preview = request.app.state.gsc_previews.get(preview_token, site_id)
+        if preview is None:
+            return render_import_error(
+                request,
+                site,
+                title="Предпросмотр недоступен",
+                message="Он истёк, уже использован, принадлежит другому сайту или приложение было перезапущено. Загрузите файл снова.",
+                status_code=409,
+            )
+        mapping_form = {field: value(field) for field in LOGICAL_FIELDS}
+        mapping, mapping_errors = parse_mapping(
+            mapping_form, len(preview.parsed.headers)
+        )
+        if mapping_errors:
+            return render_mapping_screen(
+                request,
+                site,
+                preview,
+                mapping_form=mapping_form,
+                errors=mapping_errors,
+                status_code=422,
+            )
+        acquired = request.app.state.gsc_previews.acquire(preview_token, site_id)
+        if acquired is None:
+            return render_import_error(
+                request,
+                site,
+                title="Импорт уже подтверждается",
+                message="Повторная отправка не создаст второй импорт. Обновите историю через несколько секунд.",
+                status_code=409,
+            )
+        validation = validate_rows(acquired.parsed, mapping, site.url)
+        if validation.error_count:
+            request.app.state.gsc_previews.release(preview_token)
+            return render_mapping_screen(
+                request,
+                site,
+                acquired,
+                mapping_form=mapping_form,
+                row_errors=validation.errors,
+                row_error_count=validation.error_count,
+                status_code=422,
+            )
+        try:
+            save_import(
+                request.app.state.engine,
+                site_id=site_id,
+                filename=acquired.parsed.filename,
+                period_start=acquired.period_start,
+                period_end=acquired.period_end,
+                delimiter=acquired.parsed.delimiter,
+                metrics=validation.metrics,
+                now_provider=clock,
+            )
+        except Exception as error:
+            request.app.state.gsc_previews.release(preview_token)
+            request.app.state.logger.error("Импорт Search Console не сохранён: %s", error)
+            return render_import_error(
+                request,
+                site,
+                title="Импорт не сохранён",
+                message="Транзакция отменена, ранее сохранённые данные не изменены. Повторите подтверждение.",
+                status_code=500,
+            )
+        request.app.state.gsc_previews.consume(preview_token)
+        return RedirectResponse(url=f"/sites/{site_id}/imports?imported=1", status_code=303)
+
+    @application.get("/sites/{site_id}/gsc-pages", response_class=HTMLResponse)
+    async def gsc_page_metrics(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        periods = list_periods(request.app.state.engine, site_id)
+        errors: dict[str, str] = {}
+        combined_period = request.query_params.get("period", "")
+        start_text = request.query_params.get("period_start", "")
+        end_text = request.query_params.get("period_end", "")
+        if combined_period:
+            try:
+                start_text, end_text = combined_period.split("|", maxsplit=1)
+            except ValueError:
+                start_text = end_text = "invalid"
+        if start_text or end_text:
+            try:
+                selected = (date.fromisoformat(start_text), date.fromisoformat(end_text))
+            except ValueError:
+                selected = None
+                errors["period"] = "Выберите существующий период."
+            if selected is not None and selected not in periods:
+                errors["period"] = "Выберите существующий период."
+                selected = None
+        else:
+            selected = periods[0] if periods else None
+        page, page_error = parse_positive_page(request.query_params.get("page", "1"))
+        if page_error:
+            errors["page"] = page_error
+        metric_page = None
+        if selected is not None:
+            metric_page = list_metrics(
+                request.app.state.engine, site_id, selected[0], selected[1], page
+            )
+            if page > metric_page.total_pages and metric_page.total_items:
+                errors["page"] = "Номер страницы выходит за пределы показателей."
+                page = metric_page.total_pages
+                metric_page = list_metrics(
+                    request.app.state.engine, site_id, selected[0], selected[1], page
+                )
+        return templates.TemplateResponse(
+            request=request,
+            name="gsc_metrics.html",
+            context={
+                "site": site,
+                "periods": periods,
+                "selected": selected,
+                "metric_page": metric_page,
+                "errors": errors,
+                "format_ctr": lambda ctr: f"{(ctr * Decimal(100)):.2f} %",
+            },
+            status_code=422 if errors else 200,
+        )
 
     def render_edit_site(
         request: Request,
@@ -539,6 +790,113 @@ def create_app(
                 "retried": request.query_params.get("retried") == "1",
                 "email_test": request.query_params.get("email_test"),
             },
+            status_code=status_code,
+        )
+
+    def parse_positive_page(value: str) -> tuple[int, str | None]:
+        try:
+            page = int(value)
+            if str(page) != value or not 1 <= page <= 1_000_000:
+                raise ValueError
+        except ValueError:
+            return 1, "Номер страницы должен быть положительным целым числом."
+        return page, None
+
+    async def read_small_form_body(request: Request, limit: int = 65_536) -> bytes | None:
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > limit:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    def render_import_screen(
+        request: Request,
+        site: Site,
+        *,
+        form: dict[str, str] | None = None,
+        errors: dict[str, str] | None = None,
+        status_code: int = 200,
+        page: int = 1,
+        action_error: str | None = None,
+    ) -> HTMLResponse:
+        history = list_imports(request.app.state.engine, site.id, page)
+        if page > history.total_pages and history.total_items:
+            page = history.total_pages
+            history = list_imports(request.app.state.engine, site.id, page)
+            action_error = "Номер страницы выходит за пределы истории."
+            status_code = 422
+        return templates.TemplateResponse(
+            request=request,
+            name="gsc_import.html",
+            context={
+                "site": site,
+                "form": form or {"period_start": "", "period_end": "", "report_confirmed": ""},
+                "errors": errors or {},
+                "action_error": action_error,
+                "history": history,
+                "imported": request.query_params.get("imported") == "1",
+                "upload_token": create_action_token(
+                    request.app.state.action_token_secret, site.id, UPLOAD_GSC_ACTION
+                ),
+                "to_local_datetime": to_event_local_datetime,
+            },
+            status_code=status_code,
+        )
+
+    def render_mapping_screen(
+        request: Request,
+        site: Site,
+        preview: ImportPreview,
+        *,
+        mapping_form: dict[str, str] | None = None,
+        errors: dict[str, str] | None = None,
+        row_errors: tuple[str, ...] = (),
+        row_error_count: int = 0,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        if mapping_form is None:
+            mapping_form = {
+                field: (
+                    "" if preview.parsed.suggested_index(field) is None
+                    else str(preview.parsed.suggested_index(field))
+                )
+                for field in LOGICAL_FIELDS
+            }
+        return templates.TemplateResponse(
+            request=request,
+            name="gsc_mapping.html",
+            context={
+                "site": site,
+                "preview": preview,
+                "mapping_form": mapping_form,
+                "errors": errors or {},
+                "row_errors": row_errors,
+                "row_error_count": row_error_count,
+                "field_titles": FIELD_TITLES,
+                "confirm_token": create_action_token(
+                    request.app.state.action_token_secret,
+                    site.id,
+                    confirm_gsc_action(preview.token),
+                ),
+            },
+            status_code=status_code,
+        )
+
+    def render_import_error(
+        request: Request,
+        site: Site,
+        *,
+        title: str,
+        message: str,
+        status_code: int,
+    ) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="gsc_import_error.html",
+            context={"site": site, "title": title, "message": message},
             status_code=status_code,
         )
 
@@ -1229,6 +1587,9 @@ def create_app(
         schedule_count, scheduled_entry_count = count_schedule_data(
             request.app.state.engine, site_id
         )
+        gsc_import_count, gsc_metric_count = count_import_data(
+            request.app.state.engine, site_id
+        )
         return templates.TemplateResponse(
             request=request,
             name="delete_site.html",
@@ -1243,6 +1604,8 @@ def create_app(
                 "crawl_price_count": crawl_price_count,
                 "schedule_count": schedule_count,
                 "scheduled_entry_count": scheduled_entry_count,
+                "gsc_import_count": gsc_import_count,
+                "gsc_metric_count": gsc_metric_count,
                 "confirmation_token": create_delete_confirmation_token(
                     request.app.state.action_token_secret,
                     site_id,

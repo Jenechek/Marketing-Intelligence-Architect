@@ -1,11 +1,11 @@
 """Модели локальных данных приложения."""
 
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 from decimal import Decimal
 from fractions import Fraction
 
-from sqlalchemy import Boolean, CheckConstraint, Column, DateTime, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, Text, UniqueConstraint
 from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
@@ -157,6 +157,93 @@ class AvailabilityCheck(SQLModel, table=True):
     message: str
     robots_status: int | None = None
     page_status: int | None = None
+
+
+class GSCImport(SQLModel, table=True):
+    """Подтверждённый импорт отчёта Search Console «Страницы»."""
+
+    __table_args__ = (
+        CheckConstraint("source_type = 'gsc_pages'", name="ck_gsc_import_source_type"),
+        CheckConstraint("period_start <= period_end", name="ck_gsc_import_period"),
+        CheckConstraint("row_count >= 0", name="ck_gsc_import_row_count"),
+        CheckConstraint("added_count >= 0", name="ck_gsc_import_added_count"),
+        CheckConstraint("updated_count >= 0", name="ck_gsc_import_updated_count"),
+        CheckConstraint("unchanged_count >= 0", name="ck_gsc_import_unchanged_count"),
+        CheckConstraint(
+            "delimiter IN (',', ';', '\t')",
+            name="ck_gsc_import_delimiter",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    site_id: int = Field(foreign_key="site.id", index=True)
+    source_type: str = Field(default="gsc_pages", index=True)
+    filename: str = Field(sa_column=Column(Text, nullable=False))
+    period_start: date = Field(sa_column=Column(Date, nullable=False, index=True))
+    period_end: date = Field(sa_column=Column(Date, nullable=False, index=True))
+    imported_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(UTCDateTime(), nullable=False, index=True),
+    )
+    row_count: int
+    added_count: int
+    updated_count: int
+    unchanged_count: int
+    delimiter: str
+
+
+class GSCPageMetric(SQLModel, table=True):
+    """Текущие показатели страницы Search Console за один период."""
+
+    __table_args__ = (
+        UniqueConstraint(
+            "site_id",
+            "period_start",
+            "period_end",
+            "normalized_url",
+            name="uq_gsc_page_metric_site_period_url",
+        ),
+        CheckConstraint("period_start <= period_end", name="ck_gsc_page_metric_period"),
+        CheckConstraint("clicks >= 0", name="ck_gsc_page_metric_clicks"),
+        CheckConstraint("impressions >= 0", name="ck_gsc_page_metric_impressions"),
+        CheckConstraint(
+            "clicks <= impressions",
+            name="ck_gsc_page_metric_clicks_impressions",
+        ),
+        CheckConstraint(
+            "average_position_text IS NULL OR average_position_text <> ''",
+            name="ck_gsc_page_metric_position",
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    site_id: int = Field(foreign_key="site.id", index=True)
+    period_start: date = Field(sa_column=Column(Date, nullable=False, index=True))
+    period_end: date = Field(sa_column=Column(Date, nullable=False, index=True))
+    normalized_url: str = Field(sa_column=Column(Text, nullable=False))
+    clicks: int
+    impressions: int
+    average_position_text: str | None = Field(
+        default=None,
+        sa_column=Column(Text, nullable=True),
+    )
+    last_import_id: int = Field(foreign_key="gscimport.id", index=True)
+    updated_at: datetime = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column=Column(UTCDateTime(), nullable=False),
+    )
+
+    @property
+    def average_position(self) -> Decimal | None:
+        if self.average_position_text is None:
+            return None
+        return Decimal(self.average_position_text)
+
+    @property
+    def ctr(self) -> Decimal:
+        if self.impressions == 0:
+            return Decimal(0)
+        return Decimal(self.clicks) / Decimal(self.impressions)
 
 
 class CrawlRun(SQLModel, table=True):

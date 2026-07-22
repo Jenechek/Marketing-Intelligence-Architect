@@ -13,6 +13,8 @@ from .models import (
     CrawlPageRecord,
     CrawlPageSnapshot,
     CrawlRun,
+    GSCImport,
+    GSCPageMetric,
     PriceChangeEvent,
     Site,
     SnapshotChangeEvent,
@@ -180,6 +182,8 @@ def delete_site(engine: Engine, site_id: int) -> bool:
             delete(CrawlPageRecord).where(CrawlPageRecord.crawl_run_id.in_(run_ids))
         )
         session.exec(delete(CrawlRun).where(CrawlRun.site_id == site_id))
+        session.exec(delete(GSCPageMetric).where(GSCPageMetric.site_id == site_id))
+        session.exec(delete(GSCImport).where(GSCImport.site_id == site_id))
         session.delete(site)
         session.commit()
         return True
