@@ -244,6 +244,11 @@ input[aria-invalid="true"], select[aria-invalid="true"] { border-color: #b83b3b;
 .comparison-divider { width: 3px; height: 42px; margin: 0 auto; background: #657289; }
 .exact-value { max-height: 32rem; overflow: auto; white-space: pre-wrap; }
 .missing-value { margin-bottom: 0; color: #52617a; font-style: italic; }
+.integration-card { margin-bottom: 22px; }
+.status-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px 24px; }
+.status-grid div { padding:12px; background:#f6f8fb; border-radius:10px; }
+.status-grid dt { color:#52617a; font-size:.9rem; }
+.status-grid dd { margin:5px 0 0; font-weight:700; }
 .value-links { max-height: 32rem; margin-bottom: 0; padding-left: 24px; overflow: auto; }
 .value-links li { margin-bottom: 8px; }
 
@@ -258,6 +263,7 @@ input[aria-invalid="true"], select[aria-invalid="true"] { border-color: #b83b3b;
     .filter-grid { grid-template-columns: 1fr; gap: 0; }
     .graph-node-list { columns: 1; }
     .signal-summary { grid-template-columns: 1fr; }
+    .status-grid { grid-template-columns:1fr; }
     .danger-zone { align-items: flex-start; flex-direction: column; }
     .history-item summary { align-items: flex-start; flex-direction: column; gap: 6px; }
 }

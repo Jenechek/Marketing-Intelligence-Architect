@@ -23,8 +23,8 @@
             <p>Идентификатор сайта, обходы, расписание, структура и история изменений сохранятся. Сайт исчезнет из раздела «{{ source_section.title }}» и появится только в разделе «{{ target_section.title }}».</p>
             {% if target_type == 'owned' %}
             <p>После переноса станут доступны импорт и показатели Search Console.</p>
-            {% elif gsc_import_count or gsc_metric_count %}
-            <div class="notice warning" role="note">Перенос заблокирован: импортов Search Console — {{ gsc_import_count }}, показателей — {{ gsc_metric_count }}. Эти данные не удаляются автоматически.</div>
+            {% elif gsc_import_count or gsc_metric_count or integration_count %}
+            <div class="notice warning" role="note">Перенос заблокирован: импортов Search Console — {{ gsc_import_count }}, показателей — {{ gsc_metric_count }}, записей интеграций — {{ integration_count }}. Эти данные не удаляются автоматически.</div>
             {% else %}
             <p>После переноса действия Search Console будут недоступны. Сохранённых данных Search Console у сайта нет.</p>
             {% endif %}
@@ -34,7 +34,7 @@
                 <input type="hidden" name="target_type" value="{{ target_type }}">
                 <input type="hidden" name="action_token" value="{{ action_token }}">
                 <div class="form-actions">
-                    <button class="primary-action" type="submit" {% if target_type == 'competitor' and (gsc_import_count or gsc_metric_count) %}disabled{% endif %}>Подтвердить перенос</button>
+                    <button class="primary-action" type="submit" {% if target_type == 'competitor' and (gsc_import_count or gsc_metric_count or integration_count) %}disabled{% endif %}>Подтвердить перенос</button>
                     <a class="secondary-action" href="{{ source_section.path }}">Не переносить</a>
                 </div>
             </form>

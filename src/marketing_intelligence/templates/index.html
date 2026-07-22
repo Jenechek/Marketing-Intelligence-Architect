@@ -64,6 +64,7 @@
                     <div class="site-actions">
                         <span class="site-status">Добавлен</span>
                         {% if site_type == 'owned' %}
+                        <a class="primary-action" href="/own-sites/{{ site.id }}/integrations">Интеграции</a>
                         <a class="secondary-action" href="/own-sites/{{ site.id }}/imports">Импорт Search Console</a>
                         <a class="secondary-action" href="/own-sites/{{ site.id }}/gsc-pages">Показатели Search Console</a>
                         {% endif %}

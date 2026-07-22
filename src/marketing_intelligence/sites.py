@@ -23,6 +23,7 @@ from .models import (
     SnapshotChangeEvent,
 )
 from .scheduler import delete_schedule_data
+from .integrations import count_site_data as count_integration_data, delete_site_data as delete_integration_data
 
 
 class ActiveSiteCrawlError(RuntimeError):
@@ -144,10 +145,13 @@ def transfer_site(
     with Session(engine) as session:
         statement = update(Site).where(Site.id == site_id, Site.site_type == source)
         if source == SITE_TYPE_OWNED:
+            integration_blocked = count_integration_data(session, site_id) > 0
             statement = statement.where(
                 ~exists(select(GSCImport.id).where(GSCImport.site_id == site_id)),
                 ~exists(select(GSCPageMetric.id).where(GSCPageMetric.site_id == site_id)),
             )
+            if integration_blocked:
+                statement = statement.where(text("0 = 1"))
         result = session.exec(statement.values(site_type=target))
         if result.rowcount == 1:
             session.commit()
@@ -162,7 +166,7 @@ def transfer_site(
         ):
             raise SiteTransferBlockedError(
                 "Сайт нельзя перенести в конкуренты, пока у него есть "
-                "импорты или показатели Search Console."
+                "импорты или показатели Search Console либо данные интеграций."
             )
         return None
 
@@ -262,6 +266,7 @@ def delete_site(engine: Engine, site_id: int) -> bool:
         session.exec(delete(CrawlRun).where(CrawlRun.site_id == site_id))
         session.exec(delete(GSCPageMetric).where(GSCPageMetric.site_id == site_id))
         session.exec(delete(GSCImport).where(GSCImport.site_id == site_id))
+        delete_integration_data(session, site_id)
         session.delete(site)
         session.commit()
         return True
