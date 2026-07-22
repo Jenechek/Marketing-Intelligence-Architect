@@ -24,7 +24,7 @@
 <main class="page-shell structure-shell">
     <header class="page-header">
         <div><p class="eyebrow">Карта структуры сайта</p><h1>{{ site.name }}</h1><p class="lead break-text">{{ site.url }}</p></div>
-        <a class="secondary-action" href="/">К сайтам</a>
+        <a class="secondary-action" href="{{ site_list_url(site) }}">К сайтам</a>
     </header>
 
     {% if errors %}

@@ -126,7 +126,7 @@ def test_background_progress_completion_and_ui_availability(tmp_path: Path) -> N
             snapshots_while_running = session.exec(select(CrawlPageSnapshot)).all()
 
         assert home.status_code == 200
-        assert "Добавленные сайты" in home.text
+        assert "Конкуренты" in home.text
         assert progress.status_code == 200
         assert '<meta http-equiv="refresh" content="1">' in progress.text
         assert "1</strong> / 200 страниц обработано" in progress.text

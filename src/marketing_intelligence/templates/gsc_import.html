@@ -14,7 +14,7 @@
             <h1>Импорт данных</h1>
             <p class="lead">Google Search Console: «Эффективность» → «Страницы».</p>
         </div>
-        <a class="secondary-action" href="/">К сайтам</a>
+        <a class="secondary-action" href="/own-sites">К своим сайтам</a>
     </header>
 
     {% if imported %}<div class="notice success" role="status">Импорт подтверждён и сохранён.</div>{% endif %}
@@ -27,7 +27,7 @@
             По CSV нельзя определить дополнительные фильтры. Убедитесь, что фильтров нет. Выгрузка может быть неполной: отсутствующие при повторном импорте строки не удаляются.
         </div>
         {% if errors %}<div class="notice error" role="alert">Проверьте отмеченные поля.</div>{% endif %}
-        <form action="/sites/{{ site.id }}/imports/preview" method="post" enctype="multipart/form-data" novalidate>
+        <form action="/own-sites/{{ site.id }}/imports/preview" method="post" enctype="multipart/form-data" novalidate>
             <input type="hidden" name="action_token" value="{{ upload_token }}">
             <div class="field">
                 <label for="csv_file">CSV-файл</label>
@@ -57,7 +57,7 @@
     <section class="content-card" aria-labelledby="history-title">
         <div class="section-heading">
             <h2 id="history-title">История импортов</h2>
-            <a class="secondary-action" href="/sites/{{ site.id }}/gsc-pages">Сохранённые показатели</a>
+            <a class="secondary-action" href="/own-sites/{{ site.id }}/gsc-pages">Сохранённые показатели</a>
         </div>
         {% if history.items %}
         <div class="table-scroll"><table class="structure-table">

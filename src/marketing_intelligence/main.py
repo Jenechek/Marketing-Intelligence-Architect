@@ -88,7 +88,7 @@ from .crawl_settings import default_crawl_form, parse_crawl_settings
 from .crawler import CrawlSettings, Crawler
 from .crawl_dispatcher import CrawlQueueDispatcher
 from .logging_config import configure_logging
-from .models import Site
+from .models import Site, SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED
 from .scheduler import (
     FREQUENCY_TITLES,
     RETRYABLE,
@@ -124,10 +124,13 @@ from .site_structure_presentation import build_graph_view, safe_external_url
 from .site_structure_query import has_site_structure, load_site_structure
 from .sites import (
     ActiveSiteCrawlError,
+    SiteTransferBlockedError,
     add_site,
     delete_site,
     get_site,
+    get_site_of_type,
     list_sites,
+    transfer_site,
     update_site,
     validate_site,
 )
@@ -137,6 +140,43 @@ from .smtp_notifications import MailTransport, SMTPNotifier
 PACKAGE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=PACKAGE_DIR / "templates")
 UPLOAD_GSC_ACTION = "upload-gsc-pages"
+
+SITE_SECTIONS = {
+    SITE_TYPE_COMPETITOR: {
+        "path": "/competitors",
+        "title": "Конкуренты",
+        "eyebrow": "Мониторинг конкурентов",
+        "lead": "Добавляйте сайты конкурентов и отслеживайте их изменения.",
+        "item_label": "сайт конкурента",
+        "add_title": "Добавить сайт конкурента",
+        "empty_title": "Сайтов пока нет",
+        "history_path": "/competitors/changes",
+        "history_title": "История изменений конкурентов",
+    },
+    SITE_TYPE_OWNED: {
+        "path": "/own-sites",
+        "title": "Свои сайты",
+        "eyebrow": "Собственные сайты",
+        "lead": "Следите за своими сайтами и загружайте показатели Search Console.",
+        "item_label": "собственный сайт",
+        "add_title": "Добавить собственный сайт",
+        "empty_title": "Своих сайтов пока нет",
+        "history_path": "/own-sites/changes",
+        "history_title": "История изменений собственных сайтов",
+    },
+}
+
+
+def site_list_url(site: Site) -> str:
+    return SITE_SECTIONS[site.site_type]["path"]
+
+
+def transfer_action(source_type: str, target_type: str) -> str:
+    return f"transfer-site:{source_type}:{target_type}"
+
+
+templates.env.globals["site_list_url"] = site_list_url
+templates.env.globals["site_section"] = lambda site: SITE_SECTIONS[site.site_type]
 
 
 def confirm_gsc_action(preview_token: str) -> str:
@@ -235,12 +275,14 @@ def create_app(
 
     def render_sites(
         request: Request,
+        site_type: str,
         *,
         form: dict[str, str] | None = None,
         errors: dict[str, str] | None = None,
         status_code: int = 200,
     ) -> HTMLResponse:
-        sites = list_sites(request.app.state.engine)
+        section = SITE_SECTIONS[site_type]
+        sites = list_sites(request.app.state.engine, site_type)
         summaries = load_schedule_summaries(
             request.app.state.engine,
             [site.id for site in sites if site.id is not None],
@@ -250,6 +292,9 @@ def create_app(
             name="index.html",
             context={
                 "sites": sites,
+                "site_type": site_type,
+                "section": section,
+                "sections": SITE_SECTIONS,
                 "schedule_summaries": summaries,
                 "scheduled_status_title": scheduled_status_title,
                 "to_local_datetime": to_local_datetime,
@@ -258,16 +303,27 @@ def create_app(
                 "created": request.query_params.get("created") == "1",
                 "updated": request.query_params.get("updated") == "1",
                 "deleted": request.query_params.get("deleted") == "1",
+                "transferred": request.query_params.get("transferred") == "1",
             },
             status_code=status_code,
         )
 
-    @application.get("/", response_class=HTMLResponse)
-    async def home(request: Request) -> HTMLResponse:
-        return render_sites(request)
+    @application.get("/")
+    async def home() -> RedirectResponse:
+        return RedirectResponse(url="/competitors", status_code=307)
 
-    @application.post("/sites", response_class=HTMLResponse)
-    async def create_site(request: Request) -> HTMLResponse:
+    @application.get("/competitors", response_class=HTMLResponse)
+    async def competitors(request: Request) -> HTMLResponse:
+        return render_sites(request, SITE_TYPE_COMPETITOR)
+
+    @application.get("/own-sites", response_class=HTMLResponse)
+    async def own_sites(request: Request) -> HTMLResponse:
+        return render_sites(request, SITE_TYPE_OWNED)
+
+    async def create_site_in_section(
+        request: Request,
+        site_type: str,
+    ) -> HTMLResponse:
         raw_form = parse_qs(
             (await request.body()).decode("utf-8", errors="replace"),
             keep_blank_values=True,
@@ -278,14 +334,51 @@ def create_app(
         }
         errors = validate_site(form["name"], form["url"])
         if errors:
-            return render_sites(request, form=form, errors=errors, status_code=422)
+            return render_sites(
+                request,
+                site_type,
+                form=form,
+                errors=errors,
+                status_code=422,
+            )
 
-        add_site(request.app.state.engine, form["name"], form["url"])
-        return RedirectResponse(url="/?created=1", status_code=303)
+        add_site(request.app.state.engine, form["name"], form["url"], site_type)
+        return RedirectResponse(
+            url=f"{SITE_SECTIONS[site_type]['path']}?created=1",
+            status_code=303,
+        )
 
-    @application.get("/sites/{site_id}/imports", response_class=HTMLResponse)
+    @application.post("/competitors", response_class=HTMLResponse)
+    async def create_competitor(request: Request) -> HTMLResponse:
+        return await create_site_in_section(request, SITE_TYPE_COMPETITOR)
+
+    @application.post("/own-sites", response_class=HTMLResponse)
+    async def create_owned_site(request: Request) -> HTMLResponse:
+        return await create_site_in_section(request, SITE_TYPE_OWNED)
+
+    @application.post("/sites", response_class=HTMLResponse)
+    async def create_legacy_site(request: Request) -> HTMLResponse:
+        return await create_site_in_section(request, SITE_TYPE_COMPETITOR)
+
+    @application.get("/sites/{site_id}/imports")
+    async def legacy_gsc_import_screen(request: Request, site_id: int):
+        site = get_site_of_type(
+            request.app.state.engine, site_id, SITE_TYPE_OWNED
+        )
+        if site is None:
+            return render_site_not_found(request)
+        query = str(request.query_params)
+        target = f"/own-sites/{site_id}/imports"
+        return RedirectResponse(
+            url=target + (f"?{query}" if query else ""),
+            status_code=307,
+        )
+
+    @application.get("/own-sites/{site_id}/imports", response_class=HTMLResponse)
     async def gsc_import_screen(request: Request, site_id: int) -> HTMLResponse:
-        site = get_site(request.app.state.engine, site_id)
+        site = get_site_of_type(
+            request.app.state.engine, site_id, SITE_TYPE_OWNED
+        )
         if site is None:
             return render_site_not_found(request)
         page, page_error = parse_positive_page(request.query_params.get("page", "1"))
@@ -297,9 +390,11 @@ def create_app(
             status_code=422 if page_error else 200,
         )
 
-    @application.post("/sites/{site_id}/imports/preview", response_class=HTMLResponse)
+    @application.post("/own-sites/{site_id}/imports/preview", response_class=HTMLResponse)
     async def gsc_import_preview(request: Request, site_id: int) -> HTMLResponse:
-        site = get_site(request.app.state.engine, site_id)
+        site = get_site_of_type(
+            request.app.state.engine, site_id, SITE_TYPE_OWNED
+        )
         if site is None:
             return render_site_not_found(request)
         try:
@@ -363,9 +458,11 @@ def create_app(
         )
         return render_mapping_screen(request, site, preview)
 
-    @application.post("/sites/{site_id}/imports/confirm", response_class=HTMLResponse)
+    @application.post("/own-sites/{site_id}/imports/confirm", response_class=HTMLResponse)
     async def confirm_gsc_import(request: Request, site_id: int) -> HTMLResponse:
-        site = get_site(request.app.state.engine, site_id)
+        site = get_site_of_type(
+            request.app.state.engine, site_id, SITE_TYPE_OWNED
+        )
         if site is None:
             return render_site_not_found(request)
         body = await read_small_form_body(request)
@@ -458,11 +555,30 @@ def create_app(
                 status_code=500,
             )
         request.app.state.gsc_previews.consume(preview_token)
-        return RedirectResponse(url=f"/sites/{site_id}/imports?imported=1", status_code=303)
+        return RedirectResponse(
+            url=f"/own-sites/{site_id}/imports?imported=1",
+            status_code=303,
+        )
 
-    @application.get("/sites/{site_id}/gsc-pages", response_class=HTMLResponse)
+    @application.get("/sites/{site_id}/gsc-pages")
+    async def legacy_gsc_page_metrics(request: Request, site_id: int):
+        site = get_site_of_type(
+            request.app.state.engine, site_id, SITE_TYPE_OWNED
+        )
+        if site is None:
+            return render_site_not_found(request)
+        query = str(request.query_params)
+        target = f"/own-sites/{site_id}/gsc-pages"
+        return RedirectResponse(
+            url=target + (f"?{query}" if query else ""),
+            status_code=307,
+        )
+
+    @application.get("/own-sites/{site_id}/gsc-pages", response_class=HTMLResponse)
     async def gsc_page_metrics(request: Request, site_id: int) -> HTMLResponse:
-        site = get_site(request.app.state.engine, site_id)
+        site = get_site_of_type(
+            request.app.state.engine, site_id, SITE_TYPE_OWNED
+        )
         if site is None:
             return render_site_not_found(request)
         periods = list_periods(request.app.state.engine, site_id)
@@ -589,12 +705,14 @@ def create_app(
         state,
         *,
         site_id: int | None = None,
+        site_type: str | None = None,
     ):
         try:
             prepared = prepare_change_event_export(
                 request.app.state.engine,
                 format_name=format_name,
                 site_id=state.site_id if site_id is None else site_id,
+                site_type=site_type,
                 event_types=(state.event_type,) if state.event_type else None,
                 from_time=state.from_time,
                 before_time=state.before_time,
@@ -938,6 +1056,119 @@ def create_app(
                 run_id,
             )
 
+    def render_transfer_site(
+        request: Request,
+        site: Site,
+        *,
+        message: str | None = None,
+        status_code: int = 200,
+    ) -> HTMLResponse:
+        target_type = (
+            SITE_TYPE_OWNED
+            if site.site_type == SITE_TYPE_COMPETITOR
+            else SITE_TYPE_COMPETITOR
+        )
+        gsc_import_count, gsc_metric_count = count_import_data(
+            request.app.state.engine, site.id
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="transfer_site.html",
+            context={
+                "site": site,
+                "source_type": site.site_type,
+                "target_type": target_type,
+                "source_section": SITE_SECTIONS[site.site_type],
+                "target_section": SITE_SECTIONS[target_type],
+                "gsc_import_count": gsc_import_count,
+                "gsc_metric_count": gsc_metric_count,
+                "message": message,
+                "action_token": create_action_token(
+                    request.app.state.action_token_secret,
+                    site.id,
+                    transfer_action(site.site_type, target_type),
+                ),
+            },
+            status_code=status_code,
+        )
+
+    @application.get("/sites/{site_id}/transfer", response_class=HTMLResponse)
+    async def confirm_transfer_site(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        return render_transfer_site(request, site)
+
+    @application.post("/sites/{site_id}/transfer", response_class=HTMLResponse)
+    async def move_site(request: Request, site_id: int) -> HTMLResponse:
+        site = get_site(request.app.state.engine, site_id)
+        if site is None:
+            return render_site_not_found(request)
+        body = await read_small_form_body(request)
+        if body is None:
+            return render_transfer_site(
+                request,
+                site,
+                message="Данные подтверждения слишком велики. Обновите страницу.",
+                status_code=413,
+            )
+        raw = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+        value = lambda name: raw.get(name, [""])[0]
+        source_type = value("source_type")
+        target_type = value("target_type")
+        expected_target = (
+            SITE_TYPE_OWNED
+            if site.site_type == SITE_TYPE_COMPETITOR
+            else SITE_TYPE_COMPETITOR
+        )
+        if source_type != site.site_type or target_type != expected_target:
+            return render_transfer_site(
+                request,
+                site,
+                message="Направление переноса устарело или указано неверно.",
+                status_code=409,
+            )
+        if not validate_action_token(
+            request.app.state.action_token_secret,
+            site_id,
+            transfer_action(source_type, target_type),
+            value("action_token"),
+        ):
+            return render_transfer_site(
+                request,
+                site,
+                message="Защитный токен недействителен. Обновите страницу.",
+                status_code=403,
+            )
+        try:
+            moved = transfer_site(
+                request.app.state.engine,
+                site_id,
+                source_type,
+                target_type,
+            )
+        except SiteTransferBlockedError as error:
+            return render_transfer_site(
+                request,
+                site,
+                message=str(error),
+                status_code=409,
+            )
+        if moved is None:
+            current = get_site(request.app.state.engine, site_id)
+            if current is None:
+                return render_site_not_found(request)
+            return render_transfer_site(
+                request,
+                current,
+                message="Сайт уже перенесён или подтверждение устарело.",
+                status_code=409,
+            )
+        return RedirectResponse(
+            url=f"{site_list_url(moved)}?transferred=1",
+            status_code=303,
+        )
+
     @application.get("/sites/{site_id}/edit", response_class=HTMLResponse)
     async def edit_site(request: Request, site_id: int) -> HTMLResponse:
         site = get_site(request.app.state.engine, site_id)
@@ -1117,9 +1348,13 @@ def create_app(
             site_id=site_id,
         )
 
-    @application.get("/changes", response_class=HTMLResponse)
-    async def global_change_events_screen(request: Request) -> HTMLResponse:
-        sites = list_sites(request.app.state.engine)
+    async def render_global_change_events_screen(
+        request: Request,
+        site_type: str,
+    ) -> HTMLResponse:
+        section = SITE_SECTIONS[site_type]
+        history_path = section["history_path"]
+        sites = list_sites(request.app.state.engine, site_type)
         form = ChangeEventListForm(
             site_id=request.query_params.get("site_id", ""),
             event_type=request.query_params.get("event_type", ""),
@@ -1145,6 +1380,9 @@ def create_app(
                 status_code = 404
         common_context = {
             "sites": sites,
+            "section": section,
+            "history_path": history_path,
+            "scope": site_type,
             "event_page": None,
             "form": form,
             "errors": errors,
@@ -1167,6 +1405,7 @@ def create_app(
             event_page = load_change_events(
                 request.app.state.engine,
                 site_id=state.site_id,
+                site_type=site_type,
                 event_types=(state.event_type,) if state.event_type else None,
                 from_time=state.from_time,
                 before_time=state.before_time,
@@ -1184,12 +1423,17 @@ def create_app(
                         "Перейдите к первой странице результатов."
                     ),
                     status_code=404,
-                    return_url=global_change_event_list_url(state, page=1),
+                    return_url=global_change_event_list_url(
+                        state, page=1, base_path=history_path
+                    ),
                     action_label="К первой странице",
                 )
             has_any_history = bool(event_page.total_count)
             if not has_any_history and (state.has_filters or state.site_id is not None):
-                has_any_history = has_change_events(request.app.state.engine)
+                has_any_history = has_change_events(
+                    request.app.state.engine,
+                    site_type=site_type,
+                )
         except ValueError as error:
             request.app.state.logger.error(
                 "Повреждён общий список событий: %s",
@@ -1206,7 +1450,7 @@ def create_app(
                 status_code=500,
             )
         query = state.query()
-        detail_suffix = "?scope=all" + (f"&{query}" if query else "")
+        detail_suffix = f"?scope={site_type}" + (f"&{query}" if query else "")
         return templates.TemplateResponse(
             request=request,
             name="global_change_events.html",
@@ -1223,12 +1467,20 @@ def create_app(
                     // EVENTS_PER_PAGE,
                 ),
                 "previous_url": (
-                    global_change_event_list_url(state, page=state.page - 1)
+                    global_change_event_list_url(
+                        state,
+                        page=state.page - 1,
+                        base_path=history_path,
+                    )
                     if state.page > 1
                     else None
                 ),
                 "next_url": (
-                    global_change_event_list_url(state, page=state.page + 1)
+                    global_change_event_list_url(
+                        state,
+                        page=state.page + 1,
+                        base_path=history_path,
+                    )
                     if state.page * EVENTS_PER_PAGE < event_page.total_count
                     else None
                 ),
@@ -1244,15 +1496,18 @@ def create_app(
                     not event.is_viewed,
                 ),
                 "view_state_changed": request.query_params.get("view_state_changed") == "1",
-                "json_export_url": "/changes/export.json"
+                "json_export_url": f"{history_path}/export.json"
                 + (f"?{state.query(page=1)}" if state.query(page=1) else ""),
-                "csv_export_url": "/changes/export.csv"
+                "csv_export_url": f"{history_path}/export.csv"
                 + (f"?{state.query(page=1)}" if state.query(page=1) else ""),
             },
         )
 
-    @application.get("/changes/export.{format_name}")
-    async def global_change_events_export(request: Request, format_name: str):
+    async def global_change_events_export_for_type(
+        request: Request,
+        format_name: str,
+        site_type: str,
+    ):
         if format_name not in {"json", "csv"}:
             return render_change_event_error(
                 request,
@@ -1278,7 +1533,11 @@ def create_app(
                 message=" ".join(errors.values()),
                 status_code=422,
             )
-        if state.site_id is not None and get_site(request.app.state.engine, state.site_id) is None:
+        if state.site_id is not None and get_site_of_type(
+            request.app.state.engine,
+            state.site_id,
+            site_type,
+        ) is None:
             return render_change_event_error(
                 request,
                 None,
@@ -1286,7 +1545,59 @@ def create_app(
                 message="Выбранный сайт не существует.",
                 status_code=404,
             )
-        return prepare_export_response(request, format_name, state)
+        return prepare_export_response(
+            request,
+            format_name,
+            state,
+            site_type=site_type,
+        )
+
+    @application.get("/changes")
+    async def legacy_global_change_events(request: Request) -> RedirectResponse:
+        query = str(request.query_params)
+        return RedirectResponse(
+            url="/competitors/changes" + (f"?{query}" if query else ""),
+            status_code=307,
+        )
+
+    @application.get("/changes/export.{format_name}")
+    async def legacy_global_change_events_export(
+        request: Request,
+        format_name: str,
+    ) -> RedirectResponse:
+        query = str(request.query_params)
+        return RedirectResponse(
+            url=f"/competitors/changes/export.{format_name}"
+            + (f"?{query}" if query else ""),
+            status_code=307,
+        )
+
+    @application.get("/competitors/changes", response_class=HTMLResponse)
+    async def competitor_change_events(request: Request) -> HTMLResponse:
+        return await render_global_change_events_screen(
+            request,
+            SITE_TYPE_COMPETITOR,
+        )
+
+    @application.get("/own-sites/changes", response_class=HTMLResponse)
+    async def owned_change_events(request: Request) -> HTMLResponse:
+        return await render_global_change_events_screen(request, SITE_TYPE_OWNED)
+
+    @application.get("/competitors/changes/export.{format_name}")
+    async def competitor_change_events_export(request: Request, format_name: str):
+        return await global_change_events_export_for_type(
+            request,
+            format_name,
+            SITE_TYPE_COMPETITOR,
+        )
+
+    @application.get("/own-sites/changes/export.{format_name}")
+    async def owned_change_events_export(request: Request, format_name: str):
+        return await global_change_events_export_for_type(
+            request,
+            format_name,
+            SITE_TYPE_OWNED,
+        )
 
     @application.get(
         "/sites/{site_id}/changes/{event_id}",
@@ -1301,7 +1612,7 @@ def create_app(
         if site is None:
             return render_site_not_found(request)
         scope = request.query_params.get("scope", "")
-        if scope not in {"", "all"}:
+        if scope not in {"", SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED}:
             return render_change_event_error(
                 request,
                 site_id,
@@ -1309,8 +1620,10 @@ def create_app(
                 message="Источник списка событий указан неверно.",
                 status_code=422,
             )
+        if scope and site.site_type != scope:
+            return render_site_not_found(request)
         state, errors = parse_change_event_list_state(
-            site_id=(request.query_params.get("site_id", "") if scope == "all" else ""),
+            site_id=(request.query_params.get("site_id", "") if scope else ""),
             event_type=request.query_params.get("event_type", ""),
             date_from=request.query_params.get("date_from", ""),
             date_to=request.query_params.get("date_to", ""),
@@ -1326,7 +1639,7 @@ def create_app(
                 message=" ".join(errors.values()),
                 status_code=422,
             )
-        if scope == "all" and state.site_id not in {None, site_id}:
+        if scope and state.site_id not in {None, site_id}:
             return render_change_event_error(
                 request,
                 site_id,
@@ -1335,8 +1648,11 @@ def create_app(
                 status_code=422,
             )
         return_url = (
-            global_change_event_list_url(state)
-            if scope == "all"
+            global_change_event_list_url(
+                state,
+                base_path=SITE_SECTIONS[scope]["history_path"],
+            )
+            if scope
             else change_event_list_url(site_id, state)
         )
         source = request.query_params.get("source", "snapshot")
@@ -1457,7 +1773,7 @@ def create_app(
                 message="Источник или действие указаны неверно.",
                 status_code=422,
             )
-        if scope not in {"", "all"} or return_area not in {"list", "detail"}:
+        if scope not in {"", SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED} or return_area not in {"list", "detail"}:
             return render_change_event_error(
                 request,
                 site_id,
@@ -1465,8 +1781,10 @@ def create_app(
                 message="Область возврата указана неверно.",
                 status_code=422,
             )
+        if scope and site.site_type != scope:
+            return render_site_not_found(request)
         state, errors = parse_change_event_list_state(
-            site_id=value("site_id") if scope == "all" else "",
+            site_id=value("site_id") if scope else "",
             event_type=value("event_type"),
             date_from=value("date_from"),
             date_to=value("date_to"),
@@ -1474,7 +1792,7 @@ def create_app(
             view_status=value("view_status"),
             local_timezone=active_settings.local_timezone,
         )
-        if state is None or (scope == "all" and state.site_id not in {None, site_id}):
+        if state is None or (scope and state.site_id not in {None, site_id}):
             return render_change_event_error(
                 request,
                 site_id,
@@ -1483,13 +1801,16 @@ def create_app(
                 status_code=422,
             )
         list_url = (
-            global_change_event_list_url(state)
-            if scope == "all"
+            global_change_event_list_url(
+                state,
+                base_path=SITE_SECTIONS[scope]["history_path"],
+            )
+            if scope
             else change_event_list_url(site_id, state)
         )
         detail_parts = []
-        if scope == "all":
-            detail_parts.append("scope=all")
+        if scope:
+            detail_parts.append(f"scope={scope}")
         if source == "price":
             detail_parts.append("source=price")
         state_query = state.query()
@@ -1568,7 +1889,10 @@ def create_app(
         )
         if updated_site is None:
             return render_site_not_found(request)
-        return RedirectResponse(url="/?updated=1", status_code=303)
+        return RedirectResponse(
+            url=f"{site_list_url(updated_site)}?updated=1",
+            status_code=303,
+        )
 
     @application.get("/sites/{site_id}/delete", response_class=HTMLResponse)
     async def confirm_delete_site(request: Request, site_id: int) -> HTMLResponse:
@@ -1641,7 +1965,10 @@ def create_app(
                 error.run_id,
                 status_code=409,
             )
-        return RedirectResponse(url="/?deleted=1", status_code=303)
+        return RedirectResponse(
+            url=f"{site_list_url(site)}?deleted=1",
+            status_code=303,
+        )
 
     @application.get("/sites/{site_id}/check", response_class=HTMLResponse)
     async def check_site_screen(request: Request, site_id: int) -> HTMLResponse:

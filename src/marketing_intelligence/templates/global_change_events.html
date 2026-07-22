@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Все изменения — Marketing Intelligence</title>
+    <title>{{ section.history_title }} — Marketing Intelligence</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
 </head>
 <body>
@@ -11,10 +11,10 @@
         <header class="page-header">
             <div>
                 <p class="eyebrow">История изменений</p>
-                <h1>Все изменения</h1>
-                <p class="lead">События всех добавленных сайтов в одной хронологической ленте.</p>
+                <h1>{{ section.history_title }}</h1>
+                <p class="lead">События только сайтов раздела «{{ section.title }}».</p>
             </div>
-            <a class="secondary-action" href="/">К списку сайтов</a>
+            <a class="secondary-action" href="{{ section.path }}">К списку сайтов</a>
         </header>
 
         {% if errors %}
@@ -30,12 +30,12 @@
         <section class="content-card empty-state" aria-labelledby="no-sites-title">
             <h2 id="no-sites-title">Сайтов пока нет</h2>
             <p>Сначала добавьте сайт на главном экране. После повторных обходов изменения появятся здесь.</p>
-            <a class="secondary-action" href="/#add-site">Добавить сайт</a>
+            <a class="secondary-action" href="{{ section.path }}#add-site">Добавить сайт</a>
         </section>
         {% else %}
         <section class="content-card" aria-labelledby="filters-title">
             <h2 id="filters-title">Фильтры</h2>
-            <form class="filter-form" method="get" action="/changes">
+            <form class="filter-form" method="get" action="{{ history_path }}">
                 <div class="field">
                     <label for="site_id">Сайт</label>
                     <select id="site_id" name="site_id" {% if errors.site_id %}aria-invalid="true" aria-describedby="site-id-error"{% endif %}>
@@ -78,7 +78,7 @@
                 {% if errors.date_range %}<p class="field-error">{{ errors.date_range }}</p>{% endif %}
                 <div class="form-actions">
                     <button class="primary-action" type="submit">Применить фильтры</button>
-                    <a class="secondary-action" href="/changes">Сбросить</a>
+                    <a class="secondary-action" href="{{ history_path }}">Сбросить</a>
                 </div>
             </form>
         </section>
@@ -113,7 +113,7 @@
                             <input type="hidden" name="source" value="{{ event.source }}">
                             <input type="hidden" name="action" value="{{ 'unview' if event.is_viewed else 'view' }}">
                             <input type="hidden" name="action_token" value="{{ view_token(event) }}">
-                            <input type="hidden" name="scope" value="all">
+                            <input type="hidden" name="scope" value="{{ scope }}">
                             <input type="hidden" name="return_area" value="list">
                             <input type="hidden" name="site_id" value="{{ state.site_id_value }}">
                             <input type="hidden" name="event_type" value="{{ state.event_type_value }}">

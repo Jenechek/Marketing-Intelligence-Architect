@@ -51,7 +51,7 @@ def token(html: str, name: str) -> str:
 
 def add_site(client: TestClient, name="Сайт", url="https://example.com/") -> int:
     response = client.post(
-        "/sites", data={"name": name, "url": url}, follow_redirects=False
+        "/own-sites", data={"name": name, "url": url}, follow_redirects=False
     )
     assert response.status_code == 303
     return int(response.headers["location"].split("=")[-1]) if "site_id" in response.headers["location"] else 1
@@ -62,10 +62,10 @@ def upload_preview(
     site_id: int = 1,
     csv_text: str = "Page,Clicks,Impressions,Position\nhttps://example.com/a,2,10,1.25\n",
 ):
-    screen = client.get(f"/sites/{site_id}/imports")
+    screen = client.get(f"/own-sites/{site_id}/imports")
     upload_token = token(screen.text, "action_token")
     return client.post(
-        f"/sites/{site_id}/imports/preview",
+        f"/own-sites/{site_id}/imports/preview",
         data={
             "action_token": upload_token,
             "period_start": "2026-01-01",
@@ -87,7 +87,7 @@ def confirm_preview(client: TestClient, response, site_id: int = 1, mapping=None
     }
     data.update(mapping or {})
     return client.post(
-        f"/sites/{site_id}/imports/confirm", data=data, follow_redirects=False
+        f"/own-sites/{site_id}/imports/confirm", data=data, follow_redirects=False
     )
 
 
@@ -307,7 +307,7 @@ def test_upload_post_is_protected_and_token_is_bound_to_site(tmp_path: Path):
         add_site(client, name="Второй", url="https://second.example")
         first_screen = client.get("/sites/1/imports")
         response = client.post(
-            "/sites/2/imports/preview",
+            "/own-sites/2/imports/preview",
             data={
                 "action_token": token(first_screen.text, "action_token"),
                 "period_start": "2026-01-01",
@@ -323,7 +323,7 @@ def test_upload_post_is_protected_and_token_is_bound_to_site(tmp_path: Path):
             },
         )
         assert response.status_code == 403
-        assert client.post("/sites/1/imports/preview").status_code in {403, 422}
+        assert client.post("/own-sites/1/imports/preview").status_code in {403, 422}
 
 
 def test_metrics_match_latest_completed_or_partial_crawl_in_batch(tmp_path: Path):
@@ -400,7 +400,7 @@ def test_preview_is_lost_after_application_restart(tmp_path: Path):
     restarted, _ = build_app(tmp_path, now_provider=lambda: datetime(2026, 2, 1, tzinfo=UTC))
     with TestClient(restarted) as client:
         response = client.post(
-            "/sites/1/imports/confirm",
+            "/own-sites/1/imports/confirm",
             data={
                 "preview_token": preview_token,
                 "action_token": action_token,

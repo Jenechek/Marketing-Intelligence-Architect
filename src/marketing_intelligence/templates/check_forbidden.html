@@ -19,7 +19,7 @@
             <div class="notice error" role="alert">Сетевые запросы не выполнялись. Откройте экран проверки сайта заново.</div>
             <p><strong>{{ site.name }}</strong><br>{{ site.url }}</p>
             <a class="primary-action" href="/sites/{{ site.id }}/check">Открыть экран проверки</a>
-            <a class="secondary-action" href="/">Вернуться к списку</a>
+            <a class="secondary-action" href="{{ site_list_url(site) }}">Вернуться к списку</a>
         </section>
     </main>
 </body>

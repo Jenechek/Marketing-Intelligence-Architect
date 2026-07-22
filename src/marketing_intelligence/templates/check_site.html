@@ -52,7 +52,7 @@
             <form action="/sites/{{ site.id }}/check" method="post">
                 <input type="hidden" name="action_token" value="{{ action_token }}">
                 <button class="primary-action" type="submit">Запустить проверку</button>
-                <a class="secondary-action" href="/">Вернуться к списку</a>
+                <a class="secondary-action" href="{{ site_list_url(site) }}">Вернуться к списку</a>
             </form>
         </section>
 

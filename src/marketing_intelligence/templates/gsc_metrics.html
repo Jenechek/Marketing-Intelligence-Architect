@@ -2,7 +2,7 @@
 <html lang="ru">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Показатели Search Console — Marketing Intelligence</title><link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}"></head>
 <body><main class="page-shell">
-    <header class="page-header"><div><p class="eyebrow">{{ site.name }}</p><h1>Показатели Search Console</h1><p class="lead">Факты из последнего импорта выбранного периода; CTR рассчитан из кликов и показов.</p></div><a class="secondary-action" href="/sites/{{ site.id }}/imports">К импорту</a></header>
+    <header class="page-header"><div><p class="eyebrow">{{ site.name }}</p><h1>Показатели Search Console</h1><p class="lead">Факты из последнего импорта выбранного периода; CTR рассчитан из кликов и показов.</p></div><a class="secondary-action" href="/own-sites/{{ site.id }}/imports">К импорту</a></header>
     {% if errors %}<div class="notice error" role="alert">{% for error in errors.values() %}{{ error }}{% if not loop.last %} {% endif %}{% endfor %}</div>{% endif %}
     <section class="content-card">
         {% if periods %}<form class="filter-form" action="/sites/{{ site.id }}/gsc-pages" method="get"><div class="field"><label for="period">Период</label><select id="period" name="period"><option value="">Выберите период</option>{% for start, end in periods %}<option value="{{ start }}|{{ end }}" {% if selected == (start, end) %}selected{% endif %}>{{ start }} — {{ end }}</option>{% endfor %}</select></div><button class="primary-action" type="submit">Показать</button></form>{% endif %}

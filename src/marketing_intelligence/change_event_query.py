@@ -16,6 +16,7 @@ from .models import (
     CrawlRun,
     PriceChangeEvent,
     Site,
+    SITE_TYPES,
     SnapshotChangeEvent,
 )
 
@@ -56,13 +57,20 @@ class ChangeEventPage:
     offset: int
 
 
-def has_change_events(engine: Engine, *, site_id: int | None = None) -> bool:
+def has_change_events(
+    engine: Engine,
+    *,
+    site_id: int | None = None,
+    site_type: str | None = None,
+) -> bool:
     """Одним read-only запросом проверить наличие любой истории в области."""
 
     if site_id is not None and (
         isinstance(site_id, bool) or not isinstance(site_id, int) or site_id < 1
     ):
         raise ValueError("site_id должен быть положительным целым числом.")
+    if site_type is not None and site_type not in SITE_TYPES:
+        raise ValueError("Неизвестный тип сайта.")
     snapshot = (
         select(SnapshotChangeEvent.id.label("event_id"))
         .join(CrawlRun, SnapshotChangeEvent.current_run_id == CrawlRun.id)
@@ -74,6 +82,13 @@ def has_change_events(engine: Engine, *, site_id: int | None = None) -> bool:
     if site_id is not None:
         snapshot = snapshot.where(CrawlRun.site_id == site_id)
         price = price.where(CrawlRun.site_id == site_id)
+    if site_type is not None:
+        snapshot = snapshot.join(Site, CrawlRun.site_id == Site.id).where(
+            Site.site_type == site_type
+        )
+        price = price.join(Site, CrawlRun.site_id == Site.id).where(
+            Site.site_type == site_type
+        )
     combined = union_all(snapshot, price).subquery("existing_change_events")
     statement = select(combined.c.event_id).limit(1)
     with Session(engine) as session:
@@ -84,6 +99,7 @@ def load_change_events(
     engine: Engine,
     *,
     site_id: int | None = None,
+    site_type: str | None = None,
     event_types: Collection[HistoryEventType | str] | None = None,
     importance_levels: Collection[ChangeImportance | str] | None = None,
     from_time: datetime | None = None,
@@ -101,6 +117,8 @@ def load_change_events(
         raise ValueError("from_time должно быть раньше before_time.")
     if site_id is not None and (isinstance(site_id, bool) or not isinstance(site_id, int) or site_id < 1):
         raise ValueError("site_id должен быть положительным целым числом.")
+    if site_type is not None and site_type not in SITE_TYPES:
+        raise ValueError("Неизвестный тип сайта.")
     type_values = _history_type_values(event_types)
     importance_values = _enum_values(importance_levels, ChangeImportance, "importance_levels")
     if viewed is not None and not isinstance(viewed, bool):
@@ -112,6 +130,7 @@ def load_change_events(
             literal("snapshot").label("source"),
             literal(0).label("source_rank"),
             Site.id.label("site_id"), Site.name.label("site_name"), Site.url.label("site_url"),
+            Site.site_type.label("site_type"),
             SnapshotChangeEvent.event_type.label("event_type"), SnapshotChangeEvent.url.label("url"),
             SnapshotChangeEvent.current_completed_at.label("current_completed_at"),
             SnapshotChangeEvent.importance.label("importance"), SnapshotChangeEvent.weight.label("weight"),
@@ -139,6 +158,7 @@ def load_change_events(
             literal("price").label("source"),
             literal(1).label("source_rank"),
             Site.id.label("site_id"), Site.name.label("site_name"), Site.url.label("site_url"),
+            Site.site_type.label("site_type"),
             literal(PriceChangeEventType.PRICE_CHANGED.value).label("event_type"),
             PriceChangeEvent.url.label("url"), PriceChangeEvent.current_completed_at.label("current_completed_at"),
             cast(literal(None), String).label("importance"),
@@ -164,6 +184,8 @@ def load_change_events(
     filters = []
     if site_id is not None:
         filters.append(combined.c.site_id == site_id)
+    if site_type is not None:
+        filters.append(combined.c.site_type == site_type)
     if type_values is not None:
         filters.append(combined.c.event_type.in_(type_values))
     if importance_values is not None:
