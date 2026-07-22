@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import asyncio
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
@@ -40,6 +41,23 @@ YANDEX_PAGE_SIZE = 500
 class IntegrationError(RuntimeError):
     def __init__(self, message: str, code: str = "integration_error") -> None:
         super().__init__(message); self.code = code
+
+
+@dataclass(frozen=True)
+class OAuthCallbackStart:
+    attempt: IntegrationOAuthAttempt
+    verifier: str | None
+    expected_connection_id: int | None
+    expected_revision: int
+
+
+@dataclass(frozen=True)
+class OAuthCompletion:
+    attempt_id: int
+    connection_id: int
+    site_id: int
+    provider: str
+    revision: int
 
 
 class TokenLocks:
@@ -99,8 +117,16 @@ def start_oauth(engine: Engine, box: SecretBox, site_id: int, provider: str,
     moment = now or datetime.now(UTC); state = secrets.token_urlsafe(32)
     verifier = secrets.token_urlsafe(64) if provider == YANDEX else None
     with Session(engine) as session:
+        if engine.dialect.name == "sqlite":
+            session.exec(text("BEGIN IMMEDIATE"))
         site = session.get(Site, site_id)
         if not site or site.site_type != SITE_TYPE_OWNED: raise IntegrationError("Собственный сайт не найден.", "not_found")
+        session.exec(update(IntegrationOAuthAttempt).where(
+            IntegrationOAuthAttempt.site_id==site_id,
+            IntegrationOAuthAttempt.provider==provider,
+            IntegrationOAuthAttempt.used_at==None,
+            IntegrationOAuthAttempt.expires_at>moment,
+        ).values(used_at=moment))
         session.add(IntegrationOAuthAttempt(site_id=site_id, provider=provider,
             action="another" if another else "connect", state_hash=hashlib.sha256(state.encode()).hexdigest(),
             pkce_verifier_encrypted=box.encrypt(verifier) if verifier else None,
@@ -118,8 +144,8 @@ def start_oauth(engine: Engine, box: SecretBox, site_id: int, provider: str,
     return "https://oauth.yandex.com/authorize?" + urlencode(params)
 
 
-def consume_attempt(engine: Engine, box: SecretBox, provider: str, state: str,
-                    now: datetime | None = None) -> tuple[IntegrationOAuthAttempt, str | None]:
+def _consume_callback_start(engine: Engine, box: SecretBox, provider: str, state: str,
+                            now: datetime | None = None) -> OAuthCallbackStart:
     moment=now or datetime.now(UTC); digest=hashlib.sha256(state.encode()).hexdigest()
     with Session(engine) as session:
         if engine.dialect.name == "sqlite":
@@ -130,8 +156,34 @@ def consume_attempt(engine: Engine, box: SecretBox, provider: str, state: str,
         site=session.get(Site, attempt.site_id)
         if not site or site.site_type != SITE_TYPE_OWNED: raise IntegrationError("Собственный сайт не найден.", "not_found")
         verifier=box.decrypt(attempt.pkce_verifier_encrypted) if attempt.pkce_verifier_encrypted else None
+        connection=session.exec(select(IntegrationConnection).where(IntegrationConnection.site_id==attempt.site_id,IntegrationConnection.provider==provider)).one_or_none()
+        expected_connection_id=connection.id if connection else None;expected_revision=connection.revision if connection else 0
         attempt.used_at=moment; session.add(attempt); session.commit(); session.refresh(attempt)
-        return attempt, verifier
+        return OAuthCallbackStart(attempt,verifier,expected_connection_id,expected_revision)
+
+
+def consume_attempt(engine: Engine, box: SecretBox, provider: str, state: str,
+                    now: datetime | None = None) -> tuple[IntegrationOAuthAttempt, str | None]:
+    started=_consume_callback_start(engine,box,provider,state,now)
+    return started.attempt,started.verifier
+
+
+def _latest_attempt_matches(session: Session, attempt_id: int, site_id: int, provider: str) -> bool:
+    latest=session.exec(select(func.max(IntegrationOAuthAttempt.id)).where(IntegrationOAuthAttempt.site_id==site_id,IntegrationOAuthAttempt.provider==provider)).one()
+    attempt=session.get(IntegrationOAuthAttempt,attempt_id)
+    return bool(attempt and attempt.id==latest and attempt.site_id==site_id and attempt.provider==provider and attempt.used_at is not None)
+
+
+def validate_oauth_completion(engine: Engine, completion: OAuthCompletion) -> str:
+    """Повторно проверить принадлежность callback и неизменность подключения."""
+
+    with Session(engine) as session:
+        if engine.dialect.name == "sqlite":
+            session.exec(text("BEGIN IMMEDIATE"))
+        site=session.get(Site,completion.site_id);connection=session.get(IntegrationConnection,completion.connection_id)
+        if not site or site.site_type!=SITE_TYPE_OWNED or not connection or connection.site_id!=completion.site_id or connection.provider!=completion.provider or connection.status!="connected" or connection.revision!=completion.revision or not _latest_attempt_matches(session,completion.attempt_id,completion.site_id,completion.provider):
+            raise IntegrationError("OAuth-подключение изменилось во время callback.","connection_changed")
+        site_url=site.url;session.commit();return site_url
 
 
 async def safe_json(client: httpx.AsyncClient, method: str, url: str, **kwargs) -> dict:
@@ -150,8 +202,8 @@ async def safe_json(client: httpx.AsyncClient, method: str, url: str, **kwargs) 
 
 
 async def finish_oauth(engine: Engine, box: SecretBox, settings, provider: str, state: str,
-                       code: str, client: httpx.AsyncClient) -> int:
-    attempt, verifier=consume_attempt(engine,box,provider,state); config=provider_config(settings,provider)
+                       code: str, client: httpx.AsyncClient) -> OAuthCompletion:
+    started=_consume_callback_start(engine,box,provider,state);attempt=started.attempt;verifier=started.verifier;config=provider_config(settings,provider)
     url="https://oauth2.googleapis.com/token" if provider==GOOGLE else "https://oauth.yandex.com/token"
     form={"grant_type":"authorization_code","code":code,"client_id":config.client_id,
           "client_secret":config.client_secret,"redirect_uri":config.redirect_uri}
@@ -168,15 +220,23 @@ async def finish_oauth(engine: Engine, box: SecretBox, settings, provider: str, 
         if not site or site.site_type != SITE_TYPE_OWNED:
             raise IntegrationError("Собственный сайт удалён во время подключения.", "connection_changed")
         connection=session.exec(select(IntegrationConnection).where(IntegrationConnection.site_id==attempt.site_id,IntegrationConnection.provider==provider)).one_or_none()
-        if connection is None: connection=IntegrationConnection(site_id=attempt.site_id,provider=provider)
-        else: connection.revision += 1
+        if not _latest_attempt_matches(session,attempt.id or 0,attempt.site_id,provider):
+            raise IntegrationError("OAuth-запрос заменён более новым.","connection_changed")
+        if started.expected_connection_id is None:
+            if connection is not None:raise IntegrationError("OAuth-подключение изменилось.","connection_changed")
+            connection=IntegrationConnection(site_id=attempt.site_id,provider=provider)
+        else:
+            if not connection or connection.id!=started.expected_connection_id or connection.revision!=started.expected_revision or connection.site_id!=attempt.site_id or connection.provider!=provider:
+                raise IntegrationError("OAuth-подключение изменилось.","connection_changed")
+            connection.revision += 1
         connection.status="connected"; connection.access_token_encrypted=box.encrypt(access); connection.refresh_token_encrypted=box.encrypt(refresh)
         connection.token_expires_at=datetime.now(UTC)+timedelta(seconds=min(int(expires),86400)); connection.last_error=None; connection.updated_at=datetime.now(UTC)
         connection.provider_user_id=None
         session.add(connection); session.flush()
         session.exec(update(IntegrationSource).where(IntegrationSource.connection_id==connection.id,IntegrationSource.active==True).values(active=False))
         session.exec(update(IntegrationSyncRun).where(IntegrationSyncRun.connection_id==connection.id,IntegrationSyncRun.status=="pending").values(status="cancelled",completed_at=datetime.now(UTC),message="Запуск отменён после подключения другого OAuth-аккаунта."))
-        session.commit(); session.refresh(connection); return connection.id or 0
+        session.commit();session.refresh(connection)
+        return OAuthCompletion(attempt.id or 0,connection.id or 0,attempt.site_id,provider,connection.revision)
 
 
 def _host(value: str) -> str | None:
@@ -227,7 +287,7 @@ def automatic_resource(site_url:str,provider:str,resources:list[dict]) -> dict |
     return best[0] if len(best)==1 else None
 
 
-def select_resource(engine: Engine, connection_id: int, resource: dict, *, expected_source_id: int | None = None, expected_revision: int | None = None) -> IntegrationSource:
+def select_resource(engine: Engine, connection_id: int, resource: dict, *, expected_source_id: int | None = None, expected_revision: int | None = None, expected_attempt_id: int | None = None) -> IntegrationSource:
     with Session(engine) as session:
         if engine.dialect.name == "sqlite":
             session.exec(text("BEGIN IMMEDIATE"))
@@ -237,6 +297,8 @@ def select_resource(engine: Engine, connection_id: int, resource: dict, *, expec
             raise IntegrationError("Подключение недоступно.","connection_changed")
         if expected_revision is not None and connection.revision != expected_revision:
             raise IntegrationError("Подключение изменилось в другом окне. Обновите страницу.","connection_changed")
+        if expected_attempt_id is not None and not _latest_attempt_matches(session,expected_attempt_id,connection.site_id,connection.provider):
+            raise IntegrationError("OAuth-запрос заменён более новым.","connection_changed")
         current=session.exec(select(IntegrationSource).where(IntegrationSource.connection_id==connection_id,IntegrationSource.active==True)).one_or_none()
         current_id=current.id if current else None
         if current_id != expected_source_id:
@@ -280,7 +342,11 @@ def enqueue_sync(engine: Engine, connection_id: int, source_id: int, trigger: st
 
 async def available_resources(engine: Engine, box: SecretBox, connection_id: int,
                               client: httpx.AsyncClient, *, persist_user: bool = False,
-                              settings=None, token_locks: TokenLocks | None = None) -> list[dict]:
+                              settings=None, token_locks: TokenLocks | None = None,
+                              oauth_completion: OAuthCompletion | None = None) -> list[dict]:
+    if oauth_completion is not None:
+        if oauth_completion.connection_id != connection_id:raise IntegrationError("OAuth-подключение изменилось.","connection_changed")
+        validate_oauth_completion(engine,oauth_completion)
     with Session(engine) as session:
         connection=session.get(IntegrationConnection,connection_id)
         if not connection or connection.status != "connected" or not connection.access_token_encrypted: raise IntegrationError("Подключение не найдено.","not_found")
@@ -294,8 +360,10 @@ async def available_resources(engine: Engine, box: SecretBox, connection_id: int
         revision=connection.revision
     async def call(method,url,**kwargs):
         if settings is not None:
-            return await authenticated_json(engine,box,settings,connection_id,client,token_locks or TokenLocks(),method,url,now=datetime.now(UTC),**kwargs)
-        return await safe_json(client,method,url,headers={"Authorization":f"Bearer {token}"},**kwargs)
+            result=await authenticated_json(engine,box,settings,connection_id,client,token_locks or TokenLocks(),method,url,now=datetime.now(UTC),**kwargs)
+        else:result=await safe_json(client,method,url,headers={"Authorization":f"Bearer {token}"},**kwargs)
+        if oauth_completion is not None:validate_oauth_completion(engine,oauth_completion)
+        return result
     if provider==GOOGLE:
         data=await call("GET","https://www.googleapis.com/webmasters/v3/sites")
         raw=data.get("siteEntry",[])
@@ -311,7 +379,8 @@ async def available_resources(engine: Engine, box: SecretBox, connection_id: int
                     session.exec(text("BEGIN IMMEDIATE"))
                 connection=session.get(IntegrationConnection,connection_id)
                 site=session.get(Site,connection.site_id) if connection else None
-                if not connection or connection.status != "connected" or connection.revision != revision or not site or site.site_type != SITE_TYPE_OWNED:
+                callback_valid=oauth_completion is None or (connection and connection.revision==oauth_completion.revision and _latest_attempt_matches(session,oauth_completion.attempt_id,oauth_completion.site_id,oauth_completion.provider))
+                if not connection or connection.status != "connected" or connection.revision != revision or not site or site.site_type != SITE_TYPE_OWNED or not callback_valid:
                     raise IntegrationError("Подключение изменилось во время получения ресурсов.","connection_changed")
                 connection.provider_user_id=str(uid); session.add(connection); session.commit()
     if not isinstance(raw,list) or len(raw)>MAX_ROWS: raise IntegrationError("Список ресурсов имеет недопустимый размер.","invalid_response")

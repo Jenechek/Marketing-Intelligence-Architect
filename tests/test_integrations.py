@@ -1,12 +1,15 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+import threading
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
+import pytest
 from sqlmodel import Session, select
 
 from marketing_intelligence.config import Settings
@@ -62,6 +65,52 @@ def test_oauth_attempt_is_persistent_pkce_and_one_time(tmp_path,monkeypatch):
     try:consume_attempt(engine,box,YANDEX,state)
     except IntegrationError as exc:assert exc.code=="invalid_state"
     else:assert False
+
+
+def _oauth_state(url:str) -> str:
+    return parse_qs(urlsplit(url).query)["state"][0]
+
+
+def test_two_sequential_oauth_starts_leave_only_latest_attempt_active(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);engine=build_engine(active.database_url);initialize_database(engine);box=SecretBox(active.data_dir)
+    with Session(engine) as session:session.add(Site(id=1,name="Сайт",url="https://example.test",site_type=SITE_TYPE_OWNED));session.commit()
+    first=_oauth_state(start_oauth(engine,box,1,GOOGLE,active.google_oauth));second=_oauth_state(start_oauth(engine,box,1,GOOGLE,active.google_oauth))
+    with __import__("pytest").raises(IntegrationError) as caught:consume_attempt(engine,box,GOOGLE,first)
+    assert caught.value.code=="invalid_state"
+    attempt,_=consume_attempt(engine,box,GOOGLE,second);assert attempt.site_id==1
+
+
+def test_old_state_is_rejected_while_new_state_remains_valid(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);engine=build_engine(active.database_url);initialize_database(engine);box=SecretBox(active.data_dir)
+    with Session(engine) as session:session.add(Site(id=1,name="Сайт",url="https://example.test",site_type=SITE_TYPE_OWNED));session.commit()
+    old_state=_oauth_state(start_oauth(engine,box,1,GOOGLE,active.google_oauth));new_state=_oauth_state(start_oauth(engine,box,1,GOOGLE,active.google_oauth))
+    with pytest.raises(IntegrationError) as caught:consume_attempt(engine,box,GOOGLE,old_state)
+    assert caught.value.code=="invalid_state"
+    assert consume_attempt(engine,box,GOOGLE,new_state)[0].site_id==1
+
+
+def test_concurrent_oauth_starts_leave_only_one_active_attempt(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);engine=build_engine(active.database_url);initialize_database(engine);box=SecretBox(active.data_dir)
+    with Session(engine) as session:session.add(Site(id=1,name="Сайт",url="https://example.test",site_type=SITE_TYPE_OWNED));session.commit()
+    barrier=threading.Barrier(2)
+    def launch():barrier.wait();return _oauth_state(start_oauth(engine,box,1,GOOGLE,active.google_oauth))
+    with ThreadPoolExecutor(max_workers=2) as pool:states=[item.result() for item in (pool.submit(launch),pool.submit(launch))]
+    accepted=0
+    for state in states:
+        try:consume_attempt(engine,box,GOOGLE,state);accepted+=1
+        except IntegrationError as exc:assert exc.code=="invalid_state"
+    assert accepted==1
+
+
+def test_new_oauth_start_invalidates_only_same_site_and_provider(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);engine=build_engine(active.database_url);initialize_database(engine);box=SecretBox(active.data_dir)
+    with Session(engine) as session:
+        session.add(Site(id=1,name="Один",url="https://one.test",site_type=SITE_TYPE_OWNED));session.add(Site(id=2,name="Два",url="https://two.test",site_type=SITE_TYPE_OWNED));session.commit()
+    old=_oauth_state(start_oauth(engine,box,1,GOOGLE,active.google_oauth));other_site=_oauth_state(start_oauth(engine,box,2,GOOGLE,active.google_oauth));other_provider=_oauth_state(start_oauth(engine,box,1,YANDEX,active.yandex_oauth));latest=_oauth_state(start_oauth(engine,box,1,GOOGLE,active.google_oauth))
+    with __import__("pytest").raises(IntegrationError):consume_attempt(engine,box,GOOGLE,old)
+    assert consume_attempt(engine,box,GOOGLE,other_site)[0].site_id==2
+    assert consume_attempt(engine,box,YANDEX,other_provider)[0].site_id==1
+    assert consume_attempt(engine,box,GOOGLE,latest)[0].site_id==1
 
 
 def test_google_scope_offline_and_owned_only(tmp_path,monkeypatch):
@@ -149,6 +198,95 @@ def test_connect_is_protected_post_and_secrets_never_render(tmp_path,monkeypatch
         assert forbidden.status_code==303
 
 
+def test_google_callback_site_deleted_during_resources_is_controlled(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);started=threading.Event();release=threading.Event()
+    async def provider(request):
+        if request.url.path.endswith("/token"):return httpx.Response(200,json={"access_token":"access","refresh_token":"refresh","expires_in":3600})
+        started.set()
+        while not release.is_set():await asyncio.sleep(.01)
+        return httpx.Response(200,json={"siteEntry":[{"siteUrl":"sc-domain:example.test","permissionLevel":"siteOwner"}]})
+    app=create_app(active,integration_transport=httpx.MockTransport(provider))
+    with TestClient(app) as client:
+        client.post("/own-sites",data={"name":"Сайт","url":"https://example.test"});state=_oauth_state(start_oauth(app.state.engine,app.state.integration_box,1,GOOGLE,active.google_oauth))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(lambda:client.get(f"/oauth/{GOOGLE}/callback",params={"state":state,"code":"code"},follow_redirects=False))
+            assert started.wait(5);assert delete_site(app.state.engine,1);release.set();response=future.result(timeout=10)
+        assert response.status_code==303 and response.headers["location"]=="/own-sites?oauth=failed"
+        with Session(app.state.engine) as session:assert not session.exec(select(IntegrationConnection)).all() and not session.exec(select(IntegrationSource)).all()
+
+
+def test_yandex_callback_site_deleted_during_resources_is_controlled(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch);started=threading.Event();release=threading.Event()
+    async def provider(request):
+        if request.url.path.endswith("/token"):return httpx.Response(200,json={"access_token":"access","refresh_token":"refresh","expires_in":3600})
+        if request.url.path.endswith("/v4/user"):return httpx.Response(200,json={"user_id":42})
+        started.set()
+        while not release.is_set():await asyncio.sleep(.01)
+        return httpx.Response(200,json={"hosts":[{"host_id":"host","ascii_host_url":"https://example.test/","unicode_host_url":"https://example.test/","verified":True}]})
+    app=create_app(active,integration_transport=httpx.MockTransport(provider))
+    with TestClient(app) as client:
+        client.post("/own-sites",data={"name":"Сайт","url":"https://example.test"});state=_oauth_state(start_oauth(app.state.engine,app.state.integration_box,1,YANDEX,active.yandex_oauth))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future=pool.submit(lambda:client.get(f"/oauth/{YANDEX}/callback",params={"state":state,"code":"code"},follow_redirects=False))
+            assert started.wait(5);assert delete_site(app.state.engine,1);release.set();response=future.result(timeout=10)
+        assert response.status_code==303 and response.headers["location"]=="/own-sites?oauth=failed"
+        with Session(app.state.engine) as session:assert not session.exec(select(IntegrationConnection)).all() and not session.exec(select(IntegrationSource)).all()
+
+
+@pytest.mark.parametrize("protected_state",["resource","tokens"])
+def test_late_old_callback_cannot_mix_resource_or_replace_new_tokens(tmp_path,monkeypatch,protected_state):
+    active=settings(tmp_path,monkeypatch);old_resources=threading.Event();release_old=threading.Event()
+    async def provider(request):
+        if request.url.path.endswith("/token"):
+            code=parse_qs(request.content.decode())["code"][0]
+            return httpx.Response(200,json={"access_token":f"access-{code}","refresh_token":f"refresh-{code}","expires_in":3600})
+        authorization=request.headers.get("authorization","")
+        if authorization.endswith("access-old"):
+            old_resources.set()
+            while not release_old.is_set():await asyncio.sleep(.01)
+            resource="https://example.test/"
+        else:resource="sc-domain:example.test"
+        return httpx.Response(200,json={"siteEntry":[{"siteUrl":resource,"permissionLevel":"siteOwner"}]})
+    app=create_app(active,integration_transport=httpx.MockTransport(provider))
+    with TestClient(app):
+        with Session(app.state.engine) as session:session.add(Site(id=1,name="Сайт",url="https://example.test",site_type=SITE_TYPE_OWNED));session.commit()
+        old_state=_oauth_state(start_oauth(app.state.engine,app.state.integration_box,1,GOOGLE,active.google_oauth))
+        async def scenario():
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app),base_url="http://test") as client:
+                old_task=asyncio.create_task(client.get(f"/oauth/{GOOGLE}/callback",params={"state":old_state,"code":"old"},follow_redirects=False))
+                while not old_resources.is_set():await asyncio.sleep(.01)
+                new_state=_oauth_state(start_oauth(app.state.engine,app.state.integration_box,1,GOOGLE,active.google_oauth,another=True))
+                new_response=await client.get(f"/oauth/{GOOGLE}/callback",params={"state":new_state,"code":"new"},follow_redirects=False)
+                release_old.set();old_response=await old_task
+                return new_response,old_response
+        new_response,old_response=asyncio.run(scenario())
+        assert new_response.status_code==303 and "oauth-result" in new_response.headers["location"]
+        assert old_response.status_code==303 and old_response.headers["location"]=="/own-sites?oauth=failed"
+        with Session(app.state.engine) as session:
+            connection=session.get(IntegrationConnection,1);sources=session.exec(select(IntegrationSource)).all()
+            if protected_state=="tokens":
+                assert app.state.integration_box.decrypt(connection.access_token_encrypted)=="access-new"
+                assert app.state.integration_box.decrypt(connection.refresh_token_encrypted)=="refresh-new"
+            else:assert len(sources)==1 and sources[0].resource_id=="sc-domain:example.test" and sources[0].active
+
+
+def test_sequential_oauth_callback_still_auto_selects_both_providers(tmp_path,monkeypatch):
+    active=settings(tmp_path,monkeypatch)
+    def provider(request):
+        if request.url.path.endswith("/token"):return httpx.Response(200,json={"access_token":"access","refresh_token":"refresh","expires_in":3600})
+        if request.url.path.endswith("/webmasters/v3/sites"):return httpx.Response(200,json={"siteEntry":[{"siteUrl":"sc-domain:example.test","permissionLevel":"siteOwner"}]})
+        if request.url.path.endswith("/v4/user"):return httpx.Response(200,json={"user_id":42})
+        return httpx.Response(200,json={"hosts":[{"host_id":"host","ascii_host_url":"https://example.test/","unicode_host_url":"https://example.test/","verified":True}]})
+    app=create_app(active,integration_transport=httpx.MockTransport(provider))
+    with TestClient(app) as client:
+        client.post("/own-sites",data={"name":"Сайт","url":"https://example.test"})
+        for provider_name,config in ((GOOGLE,active.google_oauth),(YANDEX,active.yandex_oauth)):
+            state=_oauth_state(start_oauth(app.state.engine,app.state.integration_box,1,provider_name,config));response=client.get(f"/oauth/{provider_name}/callback",params={"state":state,"code":provider_name},follow_redirects=False);assert response.status_code==303 and "oauth-result" in response.headers["location"]
+        with Session(app.state.engine) as session:
+            assert len(session.exec(select(IntegrationConnection)).all())==2
+            assert len(session.exec(select(IntegrationSource).where(IntegrationSource.active==True)).all())==2
+
+
 def _connected(tmp_path,monkeypatch,provider=GOOGLE):
     active=settings(tmp_path,monkeypatch);engine=build_engine(active.database_url);initialize_database(engine);box=SecretBox(active.data_dir)
     with Session(engine) as session:
@@ -224,7 +362,7 @@ def test_new_oauth_account_deactivates_old_source_without_deleting_history(tmp_p
     auth=start_oauth(engine,box,1,GOOGLE,active.google_oauth,another=True);state=parse_qs(urlsplit(auth).query)["state"][0]
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request:httpx.Response(200,json={"access_token":"other-access","refresh_token":"other-refresh","expires_in":3600}))) as client:return await finish_oauth(engine,box,active,GOOGLE,state,"code",client)
-    assert asyncio.run(run())==1
+    assert asyncio.run(run()).connection_id==1
     with Session(engine) as session:
         assert not session.exec(select(IntegrationSource).where(IntegrationSource.active==True)).all();assert len(session.exec(select(IntegrationPageMetric)).all())==1;assert box.decrypt(session.get(IntegrationConnection,1).access_token_encrypted)=="other-access"
 

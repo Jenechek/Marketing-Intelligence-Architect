@@ -96,7 +96,7 @@ from .models import Site, SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED
 from .models import CrawlPageRecord, CrawlRun, IntegrationConnection, IntegrationPageMetric, IntegrationSchedule, IntegrationSource, IntegrationSyncRun
 from .integrations import (GOOGLE, YANDEX, PROVIDERS, IntegrationError, SecretBox,
     TokenLocks, automatic_resource, available_resources, consume_attempt, count_site_data as count_integration_data, disconnect, enqueue_sync, finish_oauth, provider_config,
-    execute_pending, mark_connections_reauthorization, recover_interrupted as recover_integration_runs, refresh_connection, save_integration_schedule, select_resource, snapshot as integration_snapshot, start_oauth, validate_connection_secrets)
+    execute_pending, mark_connections_reauthorization, recover_interrupted as recover_integration_runs, refresh_connection, save_integration_schedule, select_resource, snapshot as integration_snapshot, start_oauth, validate_connection_secrets, validate_oauth_completion)
 from .scheduler import (
     FREQUENCY_TITLES,
     RETRYABLE,
@@ -388,13 +388,12 @@ def create_app(
         code=request.query_params.get("code","")
         try:
             async with integration_client(request) as client:
-                connection_id=await finish_oauth(request.app.state.engine,box,request.app.state.settings,provider,state,code,client)
-                resources=await available_resources(request.app.state.engine,box,connection_id,client,persist_user=True,settings=request.app.state.settings,token_locks=request.app.state.integration_token_locks)
-            with Session(request.app.state.engine) as session:
-                connection=session.get(IntegrationConnection,connection_id); site_for_choice=session.get(Site,connection.site_id); site_id=connection.site_id
-            chosen=automatic_resource(site_for_choice.url,provider,resources)
-            if chosen: select_resource(request.app.state.engine,connection_id,chosen); result="connected"
-            else: result="choose-resource"
+                completion=await finish_oauth(request.app.state.engine,box,request.app.state.settings,provider,state,code,client)
+                resources=await available_resources(request.app.state.engine,box,completion.connection_id,client,persist_user=True,settings=request.app.state.settings,token_locks=request.app.state.integration_token_locks,oauth_completion=completion)
+            site_url=validate_oauth_completion(request.app.state.engine,completion);site_id=completion.site_id
+            chosen=automatic_resource(site_url,provider,resources)
+            if chosen:select_resource(request.app.state.engine,completion.connection_id,chosen,expected_revision=completion.revision,expected_attempt_id=completion.attempt_id);result="connected"
+            else:validate_oauth_completion(request.app.state.engine,completion);result="choose-resource"
         except IntegrationError:return RedirectResponse("/own-sites?oauth=failed",status_code=303)
         return RedirectResponse(f"/own-sites/{site_id}/integrations/oauth-result?provider={provider}&result={result}",status_code=303)
 
