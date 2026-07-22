@@ -255,7 +255,7 @@ def test_edit_form_opens_with_current_values(tmp_path: Path) -> None:
     assert 'value="https://example.com/old"' in response.text
     assert response.text.count('class="primary-action"') == 1
     assert "Сохранить изменения" in response.text
-    assert 'href="/">Отмена</a>' in response.text
+    assert 'href="/competitors">Отмена</a>' in response.text
     assert "Опасная зона" in response.text
     assert 'href="/sites/1/delete">Удалить сайт</a>' in response.text
 
@@ -273,7 +273,7 @@ def test_edit_site_and_keep_changes_after_restart(tmp_path: Path) -> None:
         success_response = client.get(response.headers["location"])
 
     assert response.status_code == 303
-    assert response.headers["location"] == "/?updated=1"
+    assert response.headers["location"] == "/competitors?updated=1"
     assert success_response.status_code == 200
     assert "Изменения сайта сохранены" in success_response.text
 
@@ -319,7 +319,7 @@ def test_cancel_edit_does_not_change_saved_site(tmp_path: Path) -> None:
         cancel_response = client.get("/")
 
     assert edit_response.status_code == 200
-    assert 'href="/">Отмена</a>' in edit_response.text
+    assert 'href="/competitors">Отмена</a>' in edit_response.text
     assert cancel_response.status_code == 200
     assert "Исходный сайт" in cancel_response.text
     assert "https://example.com/old" in cancel_response.text
@@ -422,7 +422,7 @@ def test_confirmed_delete_removes_only_selected_site(tmp_path: Path) -> None:
 
     assert second_response.status_code == 303
     assert response.status_code == 303
-    assert response.headers["location"] == "/?deleted=1"
+    assert response.headers["location"] == "/competitors?deleted=1"
     assert "Сайт окончательно удалён" in success_response.text
     assert "Исходный сайт" not in success_response.text
     assert "Второй сайт" in success_response.text

@@ -82,7 +82,7 @@
             </details>
             <div class="form-actions">
                 {% if has_structure %}<a class="secondary-action" href="/sites/{{ site.id }}/structure">Открыть структуру</a>{% endif %}
-                <a class="secondary-action" href="/">Вернуться к сайтам</a>
+                <a class="secondary-action" href="{{ site_list_url(site) }}">Вернуться к сайтам</a>
             </div>
         </section>
     </main>

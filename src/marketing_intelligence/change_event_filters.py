@@ -172,11 +172,12 @@ def global_change_event_list_url(
     state: ChangeEventListState,
     *,
     page: int | None = None,
+    base_path: str = "/changes",
 ) -> str:
     """Собрать безопасную ссылку общей ленты из проверенного состояния."""
 
     query = state.query(page=page)
-    return f"/changes?{query}" if query else "/changes"
+    return f"{base_path}?{query}" if query else base_path
 
 
 def _parse_date(

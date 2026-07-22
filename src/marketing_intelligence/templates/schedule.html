@@ -14,7 +14,7 @@
                 <h1>{{ site.name }}</h1>
                 <p class="lead">{{ site.url }}</p>
             </div>
-            <a class="secondary-action" href="/">К сайтам</a>
+            <a class="secondary-action" href="{{ site_list_url(site) }}">К сайтам</a>
         </header>
 
         <div class="notice" role="note">Локальный планировщик работает, пока запущен процесс FastAPI; открытый браузер не нужен. При остановленном приложении обходы не выполняются. Полностью автономный серверный режим относится к этапу 14.</div>

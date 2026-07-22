@@ -456,7 +456,7 @@ def test_global_feed_filters_explanations_pagination_return_and_two_queries(
             sqlalchemy_event.remove(app.state.engine, "before_cursor_execute", record_sql)
 
         detail_match = re.search(
-            r'href="(/sites/\d+/changes/\d+\?scope=all&amp;page=2)"',
+            r'href="(/sites/\d+/changes/\d+\?scope=competitor&amp;page=2)"',
             second.text,
         )
         assert detail_match is not None
@@ -466,7 +466,7 @@ def test_global_feed_filters_explanations_pagination_return_and_two_queries(
             "&date_from=2026-07-17&date_to=2026-07-17"
         )
         filtered_match = re.search(
-            r'href="([^"]+scope=all[^"]+)"', filtered.text
+            r'href="([^"]+scope=competitor[^"]+)"', filtered.text
         )
         assert filtered_match is not None
         filtered_detail = client.get(unescape(filtered_match.group(1)))
@@ -489,7 +489,7 @@ def test_global_feed_filters_explanations_pagination_return_and_two_queries(
         )
 
     combined = first.text + second.text
-    assert 'href="/changes">Все изменения</a>' in home.text
+    assert 'href="/competitors/changes">История изменений конкурентов</a>' in home.text
     assert first.status_code == second.status_code == detail.status_code == 200
     assert "Найдено: 28." in first.text
     assert "Основной &lt;сайт&gt;" in combined and "Чужой" in combined
@@ -507,12 +507,12 @@ def test_global_feed_filters_explanations_pagination_return_and_two_queries(
         assert explanation in combined
     assert len(event_sql) == 2
     assert sum("count(" in statement.lower() for statement in event_sql) == 1
-    assert 'href="/changes?page=2">К событиям</a>' in detail.text
+    assert 'href="/competitors/changes?page=2">К событиям</a>' in detail.text
     assert filtered.status_code == filtered_detail.status_code == 200
     assert "Найдено: 1." in filtered.text
     assert "2026-07-17 15:00:00+03:00" in filtered.text
     assert (
-        f'href="/changes?site_id={site_id}&amp;event_type=title_changed'
+        f'href="/competitors/changes?site_id={site_id}&amp;event_type=title_changed'
         '&amp;date_from=2026-07-17&amp;date_to=2026-07-17">К событиям</a>'
     ) in filtered_detail.text
     assert bad_site.status_code == bad_type.status_code == bad_date.status_code == 422
@@ -521,7 +521,7 @@ def test_global_feed_filters_explanations_pagination_return_and_two_queries(
     assert "Выбранный сайт не существует" in missing_site.text
     assert bad_page.status_code == 422
     assert missing_page.status_code == 404
-    assert f'href="/changes?site_id={site_id}&amp;event_type=title_changed"' in missing_page.text
+    assert f'href="/competitors/changes?site_id={site_id}&amp;event_type=title_changed"' in missing_page.text
     assert "По фильтрам ничего не найдено" in no_matches.text
     assert "attacker.example" not in unsafe_return.text
     assert bad_scope.status_code == 422
@@ -888,14 +888,14 @@ def test_real_loopback_two_sites_two_crawls_global_filter_detail_and_return(
                 "/changes?site_id=1&event_type=title_changed"
             )
             global_href = re.search(
-                r'href="(/sites/1/changes/\d+\?scope=all&amp;site_id=1&amp;event_type=title_changed)"',
+                r'href="(/sites/1/changes/\d+\?scope=competitor&amp;site_id=1&amp;event_type=title_changed)"',
                 global_filtered.text,
             )
             assert global_href is not None
             global_detail_path = unescape(global_href.group(1))
             global_detail = client.get(global_detail_path)
             assert (
-                'href="/changes?site_id=1&amp;event_type=title_changed">К событиям</a>'
+                'href="/competitors/changes?site_id=1&amp;event_type=title_changed">К событиям</a>'
                 in global_detail.text
             )
             listing = client.get("/sites/1/changes?event_type=title_changed")

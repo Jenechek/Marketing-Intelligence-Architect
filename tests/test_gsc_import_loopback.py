@@ -86,7 +86,7 @@ def test_actual_fastapi_loopback_crawl_and_two_gsc_imports(tmp_path: Path, monke
             trust_env=False,
             follow_redirects=True,
         ) as client:
-            created = client.post("/sites", data={"name": "Loopback", "url": root})
+            created = client.post("/own-sites", data={"name": "Loopback", "url": root})
             assert created.status_code == 200
 
             crawl_screen = client.get("/sites/1/crawl")
@@ -116,9 +116,9 @@ def test_actual_fastapi_loopback_crawl_and_two_gsc_imports(tmp_path: Path, monke
                 f"{root}found,1,5,2.5,x\n"
                 f"{root}absent,0,0,,x\n"
             )
-            import_screen = client.get("/sites/1/imports")
+            import_screen = client.get("/own-sites/1/imports")
             preview = client.post(
-                "/sites/1/imports/preview",
+                "/own-sites/1/imports/preview",
                 data={
                     "action_token": _token(import_screen.text, "action_token"),
                     "period_start": "2026-01-01",
@@ -130,7 +130,7 @@ def test_actual_fastapi_loopback_crawl_and_two_gsc_imports(tmp_path: Path, monke
             assert preview.status_code == 200
             assert "&lt;script&gt;alert(1)&lt;/script&gt;" in preview.text
             first = client.post(
-                "/sites/1/imports/confirm",
+                "/own-sites/1/imports/confirm",
                 data={
                     "preview_token": _token(preview.text, "preview_token"),
                     "action_token": _token(preview.text, "action_token"),
@@ -146,9 +146,9 @@ def test_actual_fastapi_loopback_crawl_and_two_gsc_imports(tmp_path: Path, monke
                 f"{root}found;2;5;2.75\n"
                 f"{root}new;1;4;3\n"
             )
-            import_screen = client.get("/sites/1/imports")
+            import_screen = client.get("/own-sites/1/imports")
             preview = client.post(
-                "/sites/1/imports/preview",
+                "/own-sites/1/imports/preview",
                 data={
                     "action_token": _token(import_screen.text, "action_token"),
                     "period_start": "2026-01-01",
@@ -158,7 +158,7 @@ def test_actual_fastapi_loopback_crawl_and_two_gsc_imports(tmp_path: Path, monke
                 files={"csv_file": ("Pages.csv", second_csv, "text/csv")},
             )
             second = client.post(
-                "/sites/1/imports/confirm",
+                "/own-sites/1/imports/confirm",
                 data={
                     "preview_token": _token(preview.text, "preview_token"),
                     "action_token": _token(preview.text, "action_token"),
@@ -168,8 +168,8 @@ def test_actual_fastapi_loopback_crawl_and_two_gsc_imports(tmp_path: Path, monke
             )
             assert second.status_code == 303
 
-            history = client.get("/sites/1/imports")
-            metrics = client.get("/sites/1/gsc-pages")
+            history = client.get("/own-sites/1/imports")
+            metrics = client.get("/own-sites/1/gsc-pages")
             assert history.text.count("<td>Pages.csv</td>") == 2
             assert "добавлено 1, обновлено 1, без изменений 1" in history.text
             assert "Есть в последнем обходе" in metrics.text
@@ -177,8 +177,8 @@ def test_actual_fastapi_loopback_crawl_and_two_gsc_imports(tmp_path: Path, monke
             assert "20.00 %" in metrics.text
             assert "1.23" in metrics.text and "2.75" in metrics.text
             before = sha256(database.read_bytes()).hexdigest()
-            assert client.get("/sites/1/imports").status_code == 200
-            assert client.get("/sites/1/gsc-pages").status_code == 200
+            assert client.get("/own-sites/1/imports").status_code == 200
+            assert client.get("/own-sites/1/gsc-pages").status_code == 200
             assert sha256(database.read_bytes()).hexdigest() == before
 
         with Session(app.state.engine) as session:

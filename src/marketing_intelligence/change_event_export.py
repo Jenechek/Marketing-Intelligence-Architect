@@ -79,6 +79,7 @@ def prepare_change_event_export(
     *,
     format_name: str,
     site_id: int | None,
+    site_type: str | None = None,
     event_types: tuple[HistoryEventType, ...] | None,
     from_time: datetime | None,
     before_time: datetime | None,
@@ -96,6 +97,7 @@ def prepare_change_event_export(
                 output,
                 engine,
                 site_id=site_id,
+                site_type=site_type,
                 event_types=event_types,
                 from_time=from_time,
                 before_time=before_time,
@@ -107,6 +109,7 @@ def prepare_change_event_export(
                 output,
                 engine,
                 site_id=site_id,
+                site_type=site_type,
                 event_types=event_types,
                 from_time=from_time,
                 before_time=before_time,
@@ -115,7 +118,7 @@ def prepare_change_event_export(
             )
             media_type = "text/csv; charset=utf-8"
         output.seek(0)
-        scope = f"site-{site_id}" if site_id is not None else "all-sites"
+        scope = f"site-{site_id}" if site_id is not None else (site_type or "all-sites")
         return PreparedExport(output, media_type, f"change-history-{scope}.{format_name}")
     except Exception:
         output.close()

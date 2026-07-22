@@ -8,14 +8,14 @@
 </head>
 <body>
 <main class="page-shell">
-    <header class="page-header"><div><p class="eyebrow">{{ site.name }}</p><h1>Сопоставление столбцов</h1><p class="lead">Проверьте предложения перед записью данных.</p></div><a class="secondary-action" href="/sites/{{ site.id }}/imports">Загрузить заново</a></header>
+    <header class="page-header"><div><p class="eyebrow">{{ site.name }}</p><h1>Сопоставление столбцов</h1><p class="lead">Проверьте предложения перед записью данных.</p></div><a class="secondary-action" href="/own-sites/{{ site.id }}/imports">Загрузить заново</a></header>
     <div class="notice warning" role="note">Приложение не может обнаружить фильтры по CSV. Подтверждение относится только к выбранному сайту и действует 30 минут.</div>
     {% if errors or row_error_count %}<div class="notice error" role="alert">Импорт не выполнен. {% if row_error_count %}Найдено ошибок: {{ row_error_count }}.{% else %}Исправьте сопоставление.{% endif %}</div>{% endif %}
     <section class="content-card form-card" aria-labelledby="mapping-title">
         <h2 id="mapping-title">Поля отчёта</h2>
         <p><strong>Файл:</strong> {{ preview.parsed.filename }} · <strong>Период:</strong> {{ preview.period_start }} — {{ preview.period_end }}</p>
         <p><strong>Распознанные столбцы:</strong> {% for header in preview.parsed.headers %}{{ header or '(без названия)' }}{% if not loop.last %}; {% endif %}{% endfor %}</p>
-        <form action="/sites/{{ site.id }}/imports/confirm" method="post" novalidate>
+        <form action="/own-sites/{{ site.id }}/imports/confirm" method="post" novalidate>
             <input type="hidden" name="preview_token" value="{{ preview.token }}">
             <input type="hidden" name="action_token" value="{{ confirm_token }}">
             {% for field in ('page', 'clicks', 'impressions', 'position') %}

@@ -3,19 +3,24 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Сайты — Marketing Intelligence</title>
+    <title>{{ section.title }} — Marketing Intelligence</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
 </head>
 <body>
     <main class="page-shell">
         <header class="page-header">
             <div>
-                <p class="eyebrow">Marketing Intelligence</p>
-                <h1>Сайты</h1>
-                <p class="lead">Добавьте сайты, за которыми хотите наблюдать.</p>
+                <p class="eyebrow">{{ section.eyebrow }}</p>
+                <h1>{{ section.title }}</h1>
+                <p class="lead">{{ section.lead }}</p>
             </div>
-            <a class="secondary-action" href="/changes">Все изменения</a>
+            <a class="secondary-action" href="{{ section.history_path }}">{{ section.history_title }}</a>
         </header>
+
+        <nav class="tool-navigation" aria-label="Инструменты">
+            <a href="/competitors" {% if site_type == 'competitor' %}aria-current="page"{% endif %}>Конкуренты</a>
+            <a href="/own-sites" {% if site_type == 'owned' %}aria-current="page"{% endif %}>Свои сайты</a>
+        </nav>
 
         {% if created %}
         <div class="notice success" role="status">Сайт добавлен и сохранён.</div>
@@ -26,11 +31,14 @@
         {% if deleted %}
         <div class="notice success" role="status">Сайт окончательно удалён.</div>
         {% endif %}
+        {% if transferred %}
+        <div class="notice success" role="status">Сайт перенесён в этот раздел без изменения истории и настроек.</div>
+        {% endif %}
 
         <section class="content-card" aria-labelledby="site-list-title">
             <div class="section-heading">
-                <h2 id="site-list-title">Добавленные сайты</h2>
-                <span class="count">{{ sites|length }}</span>
+                <h2 id="site-list-title">{{ section.title }}</h2>
+                <span class="count" aria-label="Количество сайтов в разделе">{{ sites|length }}</span>
             </div>
 
             {% if sites %}
@@ -55,21 +63,25 @@
                     </div>
                     <div class="site-actions">
                         <span class="site-status">Добавлен</span>
-                        <a class="secondary-action" href="/sites/{{ site.id }}/imports">Импорт данных</a>
+                        {% if site_type == 'owned' %}
+                        <a class="secondary-action" href="/own-sites/{{ site.id }}/imports">Импорт Search Console</a>
+                        <a class="secondary-action" href="/own-sites/{{ site.id }}/gsc-pages">Показатели Search Console</a>
+                        {% endif %}
                         <a class="secondary-action" href="/sites/{{ site.id }}/schedule">Расписание</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/structure">Структура</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/changes">Изменения</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/crawl">Полный обход</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/check">Проверить доступность</a>
                         <a class="secondary-action" href="/sites/{{ site.id }}/edit">Редактировать</a>
+                        <a class="secondary-action" href="/sites/{{ site.id }}/transfer">{{ 'Перенести в свои сайты' if site_type == 'competitor' else 'Перенести в конкуренты' }}</a>
                     </div>
                 </li>
                 {% endfor %}
             </ul>
             {% else %}
             <div class="empty-state">
-                <h3>Сайтов пока нет</h3>
-                <p>Заполните короткую форму ниже. Данные останутся на этом компьютере.</p>
+                <h3>{{ section.empty_title }}</h3>
+                <p>Заполните короткую форму ниже. В этом списке показываются только сайты выбранного типа.</p>
             </div>
             {% endif %}
         </section>
@@ -77,7 +89,7 @@
         <section class="content-card form-card" id="add-site" aria-labelledby="add-site-title">
             <div class="section-heading">
                 <div>
-                    <h2 id="add-site-title">Добавить сайт</h2>
+                    <h2 id="add-site-title">{{ section.add_title }}</h2>
                     <p>Нужны только название и полный адрес.</p>
                 </div>
             </div>
@@ -86,7 +98,7 @@
             <div class="notice error" role="alert">Проверьте отмеченные поля.</div>
             {% endif %}
 
-            <form action="/sites" method="post" novalidate>
+            <form action="{{ section.path }}" method="post" novalidate>
                 <div class="field">
                     <label for="name">Название</label>
                     <input id="name" name="name" type="text" value="{{ form.name }}"
@@ -104,7 +116,7 @@
                     {% if errors.url %}<p class="field-error" id="url-error">{{ errors.url }}</p>{% endif %}
                 </div>
 
-                <button class="primary-action" type="submit">Добавить сайт</button>
+                <button class="primary-action" type="submit">Добавить {{ section.item_label }}</button>
             </form>
         </section>
     </main>

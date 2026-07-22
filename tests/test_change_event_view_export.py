@@ -531,7 +531,7 @@ def test_filtered_empty_states_distinguish_absent_history_from_no_matches(
         global_no_matches = client.get(f"/changes?site_id={empty_site.id}")
         mismatched_scope = client.get(
             f"/sites/{history_site}/changes/{snapshot_id}"
-            f"?scope=all&site_id={empty_site.id}"
+            f"?scope=competitor&site_id={empty_site.id}"
         )
     assert "По фильтрам ничего не найдено" in local_no_matches.text
     assert "Истории ещё нет" not in local_no_matches.text

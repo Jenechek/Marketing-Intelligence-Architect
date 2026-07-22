@@ -5,11 +5,25 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from fractions import Fraction
 
-from sqlalchemy import Boolean, CheckConstraint, Column, Date, DateTime, Text, UniqueConstraint
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    Column,
+    Date,
+    DateTime,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.types import TypeDecorator
 from sqlmodel import Field, SQLModel
 
 from .price_persistence import decode_decimal_text
+
+
+SITE_TYPE_COMPETITOR = "competitor"
+SITE_TYPE_OWNED = "owned"
+SITE_TYPES = (SITE_TYPE_COMPETITOR, SITE_TYPE_OWNED)
 
 
 class UTCDateTime(TypeDecorator[datetime]):
@@ -36,9 +50,25 @@ class UTCDateTime(TypeDecorator[datetime]):
 class Site(SQLModel, table=True):
     """Сайт, добавленный пользователем для наблюдения."""
 
+    __table_args__ = (
+        CheckConstraint(
+            "site_type IN ('competitor', 'owned')",
+            name="ck_site_site_type",
+        ),
+    )
+
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(index=True)
     url: str
+    site_type: str = Field(
+        default=SITE_TYPE_COMPETITOR,
+        sa_column=Column(
+            String(20),
+            nullable=False,
+            server_default=SITE_TYPE_COMPETITOR,
+            index=True,
+        ),
+    )
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
