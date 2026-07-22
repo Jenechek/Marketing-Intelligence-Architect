@@ -276,6 +276,100 @@ class GSCPageMetric(SQLModel, table=True):
         return Decimal(self.clicks) / Decimal(self.impressions)
 
 
+INTEGRATION_PROVIDERS = ("google_search_console", "yandex_webmaster")
+
+
+class IntegrationConnection(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("site_id", "provider", name="uq_integration_connection_site_provider"),
+        CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_connection_provider"),
+        CheckConstraint("status IN ('connecting','connected','reauthorization_required','error','disconnected')", name="ck_integration_connection_status"),
+        CheckConstraint("revision >= 1", name="ck_integration_connection_revision"),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    site_id: int = Field(foreign_key="site.id", index=True)
+    provider: str = Field(index=True)
+    status: str = Field(default="connecting", index=True)
+    revision: int = Field(default=1, nullable=False)
+    access_token_encrypted: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    refresh_token_encrypted: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    token_expires_at: datetime | None = Field(default=None, sa_column=Column(UTCDateTime(), nullable=True))
+    provider_user_id: str | None = None
+    last_error: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_column=Column(UTCDateTime(), nullable=False))
+
+
+class IntegrationSource(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("connection_id", "version", name="uq_integration_source_version"), CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_source_provider"), CheckConstraint("version >= 1", name="ck_integration_source_version"))
+    id: int | None = Field(default=None, primary_key=True)
+    connection_id: int = Field(foreign_key="integrationconnection.id", index=True)
+    provider: str = Field(index=True)
+    version: int
+    resource_id: str = Field(sa_column=Column(Text, nullable=False))
+    resource_label: str = Field(sa_column=Column(Text, nullable=False))
+    active: bool = Field(default=True, sa_column=Column(Boolean, nullable=False, index=True))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_column=Column(UTCDateTime(), nullable=False))
+
+
+class IntegrationOAuthAttempt(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("state_hash", name="uq_integration_oauth_state"), CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_oauth_provider"), CheckConstraint("action IN ('connect','another')", name="ck_integration_oauth_action"))
+    id: int | None = Field(default=None, primary_key=True)
+    site_id: int = Field(foreign_key="site.id", index=True)
+    provider: str = Field(index=True)
+    action: str
+    state_hash: str = Field(index=True)
+    pkce_verifier_encrypted: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    created_at: datetime = Field(sa_column=Column(UTCDateTime(), nullable=False))
+    expires_at: datetime = Field(sa_column=Column(UTCDateTime(), nullable=False, index=True))
+    used_at: datetime | None = Field(default=None, sa_column=Column(UTCDateTime(), nullable=True))
+
+
+class IntegrationSchedule(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("connection_id", name="uq_integration_schedule_connection"), CheckConstraint("frequency IN ('daily','weekly')", name="ck_integration_schedule_frequency"), CheckConstraint("local_weekday >= 0 AND local_weekday <= 6", name="ck_integration_schedule_weekday"))
+    id: int | None = Field(default=None, primary_key=True)
+    connection_id: int = Field(foreign_key="integrationconnection.id", index=True)
+    enabled: bool = Field(default=False, sa_column=Column(Boolean, nullable=False))
+    frequency: str = "weekly"
+    local_weekday: int = 0
+    local_time: str = "09:00"
+    next_run_at: datetime | None = Field(default=None, sa_column=Column(UTCDateTime(), nullable=True, index=True))
+
+
+class IntegrationSyncRun(SQLModel, table=True):
+    __table_args__ = (CheckConstraint("status IN ('pending','running','completed','partial','failed','interrupted','cancelled')", name="ck_integration_sync_status"), CheckConstraint("trigger IN ('initial','manual','scheduled')", name="ck_integration_sync_trigger"), CheckConstraint("requested_start IS NULL OR requested_end IS NULL OR requested_start <= requested_end", name="ck_integration_sync_requested_period"), CheckConstraint("actual_start IS NULL OR actual_end IS NULL OR actual_start <= actual_end", name="ck_integration_sync_actual_period"), CheckConstraint("added_count >= 0 AND updated_count >= 0 AND unchanged_count >= 0 AND rejected_count >= 0", name="ck_integration_sync_counts"))
+    id: int | None = Field(default=None, primary_key=True)
+    connection_id: int = Field(foreign_key="integrationconnection.id", index=True)
+    source_id: int | None = Field(default=None, foreign_key="integrationsource.id", index=True)
+    trigger: str
+    requested_start: date | None = None
+    requested_end: date | None = None
+    actual_start: date | None = None
+    actual_end: date | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_column=Column(UTCDateTime(), nullable=False, index=True))
+    started_at: datetime | None = Field(default=None, sa_column=Column(UTCDateTime(), nullable=True))
+    completed_at: datetime | None = Field(default=None, sa_column=Column(UTCDateTime(), nullable=True))
+    status: str = Field(default="pending", index=True)
+    added_count: int = 0
+    updated_count: int = 0
+    unchanged_count: int = 0
+    rejected_count: int = 0
+    message: str = "Ожидает запуска."
+    error_code: str | None = None
+
+
+class IntegrationPageMetric(SQLModel, table=True):
+    __table_args__ = (UniqueConstraint("source_id", "metric_date", "normalized_url", name="uq_integration_metric_source_date_url"), CheckConstraint("provider IN ('google_search_console','yandex_webmaster')", name="ck_integration_metric_provider"), CheckConstraint("clicks IS NULL OR clicks >= 0", name="ck_integration_metric_clicks"), CheckConstraint("impressions IS NULL OR impressions >= 0", name="ck_integration_metric_impressions"), CheckConstraint("clicks IS NULL OR impressions IS NULL OR clicks <= impressions", name="ck_integration_metric_clicks_impressions"), CheckConstraint("position_text IS NULL OR position_text <> ''", name="ck_integration_metric_position"))
+    id: int | None = Field(default=None, primary_key=True)
+    source_id: int = Field(foreign_key="integrationsource.id", index=True)
+    provider: str = Field(index=True)
+    metric_date: date = Field(sa_column=Column(Date, nullable=False, index=True))
+    normalized_url: str = Field(sa_column=Column(Text, nullable=False))
+    clicks: int | None = None
+    impressions: int | None = None
+    position_text: str | None = Field(default=None, sa_column=Column(Text, nullable=True))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC), sa_column=Column(UTCDateTime(), nullable=False))
+
+
 class CrawlRun(SQLModel, table=True):
     """Сохранённый запуск полного обхода сайта без содержимого страниц."""
 

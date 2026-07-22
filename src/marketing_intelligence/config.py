@@ -6,6 +6,47 @@ from email.utils import parseaddr
 import os
 from pathlib import Path
 import unicodedata
+from urllib.parse import urlsplit
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthProviderConfig:
+    """Проверенная конфигурация OAuth без отображения секрета."""
+
+    client_id: str | None = None
+    client_secret: str | None = field(default=None, repr=False)
+    redirect_uri: str | None = None
+    error: str | None = None
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.client_id and self.client_secret and self.redirect_uri and not self.error)
+
+
+def _oauth_config(prefix: str) -> OAuthProviderConfig:
+    client_id = _clean(os.getenv(f"MI_{prefix}_CLIENT_ID"))
+    secret = _clean(os.getenv(f"MI_{prefix}_CLIENT_SECRET"))
+    redirect = _clean(os.getenv(f"MI_{prefix}_REDIRECT_URI"))
+    values = (client_id, secret, redirect)
+    if not any(values):
+        return OAuthProviderConfig(error="OAuth-клиент не настроен.")
+    errors: list[str] = []
+    if not all(values):
+        errors.append("OAuth-реквизиты указаны не полностью.")
+    if redirect:
+        try:
+            parsed = urlsplit(redirect)
+            host = (parsed.hostname or "").lower()
+            _ = parsed.port
+            if parsed.username or parsed.password or parsed.query or parsed.fragment:
+                errors.append("Redirect URI не должен содержать userinfo, query или fragment.")
+            if parsed.scheme == "http" and host not in {"localhost", "127.0.0.1", "::1"}:
+                errors.append("HTTP разрешён только для локального redirect URI.")
+            elif parsed.scheme not in {"http", "https"} or not host:
+                errors.append("Redirect URI должен быть абсолютным HTTP(S)-адресом.")
+        except ValueError:
+            errors.append("Redirect URI содержит неверный адрес или порт.")
+    return OAuthProviderConfig(client_id, secret, redirect, " ".join(errors) or None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +143,9 @@ class Settings:
     database_url: str
     local_timezone: tzinfo | None = None
     smtp: SMTPConfig = field(default_factory=SMTPConfig.from_environment)
+    google_oauth: OAuthProviderConfig = field(default_factory=lambda: _oauth_config("GOOGLE"))
+    yandex_oauth: OAuthProviderConfig = field(default_factory=lambda: _oauth_config("YANDEX"))
+    integration_key: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -117,6 +161,7 @@ class Settings:
             data_dir=data_dir,
             logs_dir=logs_dir,
             database_url=database_url,
+            integration_key=_clean(os.getenv("MI_INTEGRATION_KEY")),
         )
 
 

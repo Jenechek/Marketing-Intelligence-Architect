@@ -18,6 +18,7 @@ env/
 
 # Local application data and logs
 data/
+integration.key
 logs/
 *.db
 *.db-shm
