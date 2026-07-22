@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Сопоставление столбцов — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+<main class="page-shell">
+    <header class="page-header"><div><p class="eyebrow">{{ site.name }}</p><h1>Сопоставление столбцов</h1><p class="lead">Проверьте предложения перед записью данных.</p></div><a class="secondary-action" href="/sites/{{ site.id }}/imports">Загрузить заново</a></header>
+    <div class="notice warning" role="note">Приложение не может обнаружить фильтры по CSV. Подтверждение относится только к выбранному сайту и действует 30 минут.</div>
+    {% if errors or row_error_count %}<div class="notice error" role="alert">Импорт не выполнен. {% if row_error_count %}Найдено ошибок: {{ row_error_count }}.{% else %}Исправьте сопоставление.{% endif %}</div>{% endif %}
+    <section class="content-card form-card" aria-labelledby="mapping-title">
+        <h2 id="mapping-title">Поля отчёта</h2>
+        <p><strong>Файл:</strong> {{ preview.parsed.filename }} · <strong>Период:</strong> {{ preview.period_start }} — {{ preview.period_end }}</p>
+        <p><strong>Распознанные столбцы:</strong> {% for header in preview.parsed.headers %}{{ header or '(без названия)' }}{% if not loop.last %}; {% endif %}{% endfor %}</p>
+        <form action="/sites/{{ site.id }}/imports/confirm" method="post" novalidate>
+            <input type="hidden" name="preview_token" value="{{ preview.token }}">
+            <input type="hidden" name="action_token" value="{{ confirm_token }}">
+            {% for field in ('page', 'clicks', 'impressions', 'position') %}
+            <div class="field">
+                <label for="{{ field }}">{{ field_titles[field] }}{% if field != 'position' %} (обязательно){% else %} (необязательно){% endif %}</label>
+                <select id="{{ field }}" name="{{ field }}" {% if field != 'position' %}required{% endif %} {% if errors[field] %}aria-invalid="true"{% endif %}>
+                    <option value="">{% if field == 'position' %}Не импортировать{% else %}Выберите столбец{% endif %}</option>
+                    {% for header in preview.parsed.headers %}<option value="{{ loop.index0 }}" {% if mapping_form[field] == loop.index0|string %}selected{% endif %}>{{ loop.index }}. {{ header or '(без названия)' }}</option>{% endfor %}
+                </select>
+                {% if errors[field] %}<p class="field-error">{{ errors[field] }}</p>{% endif %}
+            </div>
+            {% endfor %}
+            {% if errors.mapping %}<p class="field-error">{{ errors.mapping }}</p>{% endif %}
+            <button class="primary-action" type="submit">Подтвердить импорт</button>
+        </form>
+    </section>
+    {% if row_errors %}<section class="content-card" aria-labelledby="error-list-title"><h2 id="error-list-title">Ошибки строк</h2><ol>{% for error in row_errors %}<li>{{ error }}</li>{% endfor %}</ol>{% if row_error_count > row_errors|length %}<p>Показаны первые {{ row_errors|length }} ошибок; остальные скрыты.</p>{% endif %}</section>{% endif %}
+    <section class="content-card" aria-labelledby="preview-title">
+        <h2 id="preview-title">Предпросмотр первых строк</h2>
+        <div class="table-scroll"><table class="structure-table"><thead><tr><th>Строка</th>{% for header in preview.parsed.headers %}<th>{{ header or '(без названия)' }}</th>{% endfor %}</tr></thead><tbody>{% for row in preview.parsed.rows[:5] %}<tr><td>{{ row.source_line }}</td>{% for cell in row.values %}<td>{{ cell }}</td>{% endfor %}</tr>{% endfor %}</tbody></table></div>
+    </section>
+</main>
+</body>
+</html>

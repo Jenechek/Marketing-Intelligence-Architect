@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Импорт данных — Marketing Intelligence</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/styles.css') }}">
+</head>
+<body>
+<main class="page-shell">
+    <header class="page-header">
+        <div>
+            <p class="eyebrow">{{ site.name }}</p>
+            <h1>Импорт данных</h1>
+            <p class="lead">Google Search Console: «Эффективность» → «Страницы».</p>
+        </div>
+        <a class="secondary-action" href="/">К сайтам</a>
+    </header>
+
+    {% if imported %}<div class="notice success" role="status">Импорт подтверждён и сохранён.</div>{% endif %}
+    {% if action_error %}<div class="notice error" role="alert">{{ action_error }}</div>{% endif %}
+
+    <section class="content-card form-card" aria-labelledby="upload-title">
+        <h2 id="upload-title">Загрузить Pages.csv</h2>
+        <p>В Search Console откройте отчёт «Эффективность», выберите вкладку «Страницы» и экспортируйте CSV.</p>
+        <div class="notice warning" role="note">
+            По CSV нельзя определить дополнительные фильтры. Убедитесь, что фильтров нет. Выгрузка может быть неполной: отсутствующие при повторном импорте строки не удаляются.
+        </div>
+        {% if errors %}<div class="notice error" role="alert">Проверьте отмеченные поля.</div>{% endif %}
+        <form action="/sites/{{ site.id }}/imports/preview" method="post" enctype="multipart/form-data" novalidate>
+            <input type="hidden" name="action_token" value="{{ upload_token }}">
+            <div class="field">
+                <label for="csv_file">CSV-файл</label>
+                <input id="csv_file" name="csv_file" type="file" accept=".csv,text/csv" required {% if errors.csv_file %}aria-invalid="true" aria-describedby="csv-error"{% endif %}>
+                {% if errors.csv_file %}<p class="field-error" id="csv-error">{{ errors.csv_file }}</p>{% endif %}
+            </div>
+            <div class="field-row">
+                <div class="field">
+                    <label for="period_start">Начало периода</label>
+                    <input id="period_start" name="period_start" type="date" value="{{ form.period_start }}" required {% if errors.period_start %}aria-invalid="true"{% endif %}>
+                    {% if errors.period_start %}<p class="field-error">{{ errors.period_start }}</p>{% endif %}
+                </div>
+                <div class="field">
+                    <label for="period_end">Конец периода</label>
+                    <input id="period_end" name="period_end" type="date" value="{{ form.period_end }}" required {% if errors.period_end %}aria-invalid="true"{% endif %}>
+                    {% if errors.period_end %}<p class="field-error">{{ errors.period_end }}</p>{% endif %}
+                </div>
+            </div>
+            <div class="field checkbox-field">
+                <label><input name="report_confirmed" type="checkbox" value="yes" {% if form.report_confirmed == 'yes' %}checked{% endif %}> Это Pages.csv из вкладки «Страницы» без дополнительных фильтров</label>
+                {% if errors.report_confirmed %}<p class="field-error">{{ errors.report_confirmed }}</p>{% endif %}
+            </div>
+            <button class="primary-action" type="submit">Проверить файл</button>
+        </form>
+    </section>
+
+    <section class="content-card" aria-labelledby="history-title">
+        <div class="section-heading">
+            <h2 id="history-title">История импортов</h2>
+            <a class="secondary-action" href="/sites/{{ site.id }}/gsc-pages">Сохранённые показатели</a>
+        </div>
+        {% if history.items %}
+        <div class="table-scroll"><table class="structure-table">
+            <thead><tr><th>Импорт</th><th>Период</th><th>Файл</th><th>Строки</th><th>Итог</th></tr></thead>
+            <tbody>{% for item in history.items %}<tr>
+                <td>{{ to_local_datetime(item.imported_at) }}</td>
+                <td>{{ item.period_start }} — {{ item.period_end }}</td>
+                <td>{{ item.filename }}</td>
+                <td>{{ item.row_count }}</td>
+                <td>добавлено {{ item.added_count }}, обновлено {{ item.updated_count }}, без изменений {{ item.unchanged_count }}</td>
+            </tr>{% endfor %}</tbody>
+        </table></div>
+        {% if history.total_pages > 1 %}<nav class="pagination" aria-label="Страницы истории">
+            {% if history.page > 1 %}<a class="secondary-action" href="?page={{ history.page - 1 }}">Назад</a>{% else %}<span></span>{% endif %}
+            <span>Страница {{ history.page }} из {{ history.total_pages }}</span>
+            {% if history.page < history.total_pages %}<a class="secondary-action" href="?page={{ history.page + 1 }}">Далее</a>{% else %}<span></span>{% endif %}
+        </nav>{% endif %}
+        {% else %}<div class="empty-state"><h3>Импортов пока нет</h3><p>Первый подтверждённый импорт появится здесь.</p></div>{% endif %}
+    </section>
+</main>
+</body>
+</html>
